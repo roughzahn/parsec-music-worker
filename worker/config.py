@@ -24,15 +24,21 @@ class Settings:
         token = os.getenv("PARSEC_WORKER_TOKEN") or os.getenv("PARSEC_AUDIO_TRANSPORT_TOKEN", "")
         if not token.strip():
             raise ValueError("PARSEC_WORKER_TOKEN (or PARSEC_AUDIO_TRANSPORT_TOKEN) is required")
+        worker_id = os.getenv("PARSEC_WORKER_ID", socket.gethostname()).strip()
+        if not worker_id:
+            raise ValueError("PARSEC_WORKER_ID must not be empty")
+        max_concurrent_jobs = int(os.getenv("PARSEC_WORKER_MAX_CONCURRENT_JOBS", "1"))
+        if max_concurrent_jobs != 1:
+            raise ValueError("This worker version executes one job at a time; max concurrent jobs must be 1")
         return cls(
             gateway_url=os.getenv("PARSEC_GATEWAY_BASE_URL", "http://127.0.0.1:8766").rstrip("/"),
             token=token,
-            worker_id=os.getenv("PARSEC_WORKER_ID", socket.gethostname()).strip(),
+            worker_id=worker_id,
             worker_type=worker_type,
             poll_seconds=float(os.getenv("PARSEC_WORKER_POLL_SECONDS", "3")),
             heartbeat_seconds=float(os.getenv("PARSEC_WORKER_HEARTBEAT_SECONDS", "20")),
             request_timeout=float(os.getenv("PARSEC_WORKER_REQUEST_TIMEOUT", "60")),
             model_path=os.getenv("PARSEC_CLAP_MODEL_PATH", "/models/630k-audioset-best.pt"),
             model_id=os.getenv("PARSEC_CLAP_MODEL_ID", "laion-clap-630k-audioset-v1"),
-            max_concurrent_jobs=int(os.getenv("PARSEC_WORKER_MAX_CONCURRENT_JOBS", "1")),
+            max_concurrent_jobs=max_concurrent_jobs,
         )
