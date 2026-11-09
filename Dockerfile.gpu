@@ -1,0 +1,9 @@
+FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime
+
+ENV PYTHONUNBUFFERED=1 TZ=Europe/Berlin
+RUN apt-get update -qq && apt-get install -y -qq ffmpeg tzdata && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements-common.txt .
+RUN pip install --no-cache-dir -r requirements-common.txt
+COPY worker ./worker
+CMD ["python", "-m", "worker.main"]
