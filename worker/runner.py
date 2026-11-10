@@ -1,6 +1,7 @@
 import os
 import tempfile
 import threading
+import time
 from urllib.parse import quote
 
 from .gateway_client import GatewayClient, GatewayError
@@ -12,16 +13,30 @@ class Worker:
         self.client = client
         self.engine = engine
         self.stopping = threading.Event()
+        self.ready = threading.Event()
+        self.last_gateway_contact = None
+
+    def is_ready(self):
+        if not self.ready.is_set() or self.stopping.is_set() or self.last_gateway_contact is None:
+            return False
+        stale_after = max(60.0, self.settings.heartbeat_seconds * 3, self.settings.poll_seconds * 5)
+        return time.monotonic() - self.last_gateway_contact < stale_after
+
+    def _mark_gateway_contact(self):
+        self.last_gateway_contact = time.monotonic()
 
     def run(self):
         self.engine.load()
         print(f"Registering worker {self.settings.worker_id} ({self.settings.worker_type})", flush=True)
         self.client.register(self.settings.worker_id, self.settings.worker_type,
                              self.settings.model_id, self.settings.max_concurrent_jobs)
+        self._mark_gateway_contact()
+        self.ready.set()
         print("Worker registered; polling for analysis jobs", flush=True)
         while not self.stopping.is_set():
             try:
                 job = self.client.claim_job(quote(self.settings.worker_id, safe=""))
+                self._mark_gateway_contact()
                 if not job:
                     self.stopping.wait(self.settings.poll_seconds)
                     continue
@@ -34,6 +49,7 @@ class Worker:
                 self.stopping.wait(self.settings.poll_seconds)
 
     def stop(self):
+        self.ready.clear()
         self.stopping.set()
 
     def _process(self, job: dict):
@@ -49,6 +65,7 @@ class Worker:
             while not heartbeat_stop.wait(self.settings.heartbeat_seconds):
                 try:
                     response = self.client.heartbeat(self.settings.worker_id, job_id, lease_token)
+                    self._mark_gateway_contact()
                     if response and response.get("leaseValid") is False:
                         lease_lost.set()
                         print(f"Lease lost for job {job_id}", flush=True)

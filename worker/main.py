@@ -1,9 +1,11 @@
 import logging
 import signal
+import threading
 
 from .config import Settings
 from .engine import ClapEngine
 from .gateway_client import GatewayClient
+from .health import WorkerHealthServer
 from .runner import Worker
 
 
@@ -20,7 +22,17 @@ def main():
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
-    worker.run()
+
+    health_server = WorkerHealthServer(("0.0.0.0", settings.health_port), worker.is_ready)
+    health_thread = threading.Thread(target=health_server.serve_forever, name="health-server", daemon=True)
+    health_thread.start()
+    try:
+        worker.run()
+    finally:
+        worker.stop()
+        health_server.shutdown()
+        health_server.server_close()
+        health_thread.join(timeout=2)
 
 
 if __name__ == "__main__":

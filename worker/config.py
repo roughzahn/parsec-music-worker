@@ -15,6 +15,7 @@ class Settings:
     model_path: str
     model_id: str
     max_concurrent_jobs: int
+    health_port: int = 8081
 
     @classmethod
     def from_env(cls):
@@ -41,4 +42,5 @@ class Settings:
             model_path=os.getenv("PARSEC_CLAP_MODEL_PATH", "/models/630k-audioset-best.pt"),
             model_id=os.getenv("PARSEC_CLAP_MODEL_ID", "laion-clap-630k-audioset-v1"),
             max_concurrent_jobs=max_concurrent_jobs,
+            health_port=int(os.getenv("PARSEC_WORKER_HEALTH_PORT", "8081")),
         )

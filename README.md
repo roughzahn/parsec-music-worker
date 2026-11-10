@@ -16,6 +16,9 @@ The worker is intentionally a pull-only execution agent:
 
 The Gateway owns inventory synchronization, job creation, scheduling, retry policy and job state. The Search service remains the sole owner of the persistent search index.
 
+## Worker health endpoint
+
+The worker exposes `GET /health` on port `8081` inside its container. It returns `503 DOWN` until the CLAP model is loaded and the worker has registered successfully with the Gateway, then returns `200 UP`. It switches back to DOWN during graceful shutdown. The endpoint is used by Docker's container health check and by the Gateway readiness indicator; it is not published to the host or Internet.
 ## Runtime profiles
 
 Both profiles use the same Python application and analysis implementation. Only the container base image and PyTorch runtime differ.
