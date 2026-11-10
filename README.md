@@ -131,6 +131,17 @@ A successful result contains:
 
 The Gateway validates the lease and forwards the embedding to the Search service. Workers never modify the index directly.
 
+## Container releases
+
+Pushing a semantic version tag such as v0.1.0 runs the release workflow. It builds and publishes both runtime profiles to GHCR:
+
+- ghcr.io/roughzahn/parsec-music-worker:0.1.0-cpu
+- ghcr.io/roughzahn/parsec-music-worker:0.1.0-gpu
+
+The workflow also updates the moving latest-cpu and latest-gpu tags and creates a matching GitHub Release. The CPU and GPU images are released together from the same source revision. No model checkpoint is included in either image.
+
+Set PARSEC_WORKER_VERSION in .env to the numeric release version (for example 0.1.0) to pin both Compose profiles. Use latest only when intentionally tracking the newest release. A release is created by pushing the version tag after the PR has been merged; merging the PR itself does not publish an image.
+
 ## Development and tests
 
 Python 3.11 is used for both images.

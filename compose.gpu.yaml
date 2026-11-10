@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.gpu
-    image: ghcr.io/roughzahn/parsec-music-worker:gpu
+    image: ghcr.io/roughzahn/parsec-music-worker:${PARSEC_WORKER_VERSION:-latest}-gpu
     container_name: parsec-music-worker-gpu
     restart: unless-stopped
     environment:
@@ -14,7 +14,7 @@ services:
       PARSEC_WORKER_TYPE: gpu
       PARSEC_CLAP_MODEL_PATH: /models/630k-audioset-best.pt
     volumes:
-      - ${PARSEC_MODEL_PATH:-./models}:/models:ro
+      - C:/parsec/models:/models:ro
     deploy:
       resources:
         reservations:
