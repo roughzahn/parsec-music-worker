@@ -16,6 +16,9 @@ The worker is intentionally a pull-only execution agent:
 
 The Gateway owns inventory synchronization, job creation, scheduling, retry policy and job state. The Search service remains the sole owner of the persistent search index.
 
+## Worker health endpoint
+
+The worker exposes `GET /health` on port `8081` inside its container. It returns `503 DOWN` until the CLAP model is loaded and the worker has registered successfully with the Gateway, then returns `200 UP`. It switches back to DOWN during graceful shutdown. The endpoint is used by Docker's container health check and by the Gateway readiness indicator; it is not published to the host or Internet.
 ## Runtime profiles
 
 Both profiles use the same Python application and analysis implementation. Only the container base image and PyTorch runtime differ.
@@ -57,7 +60,7 @@ Every worker instance must have its own `PARSEC_WORKER_ID`. The same token can b
 
 ## Run on Windows
 
-Use the existing checkpoint cache without copying the 1.8 GB model into this repository. In `.env`, set `PARSEC_MODEL_PATH=C:/music-ai/model-cache` and set the Gateway URL to an address reachable from Docker Desktop (normally `http://host.docker.internal:8766` for a Gateway published on the Windows host).
+Use the existing checkpoint cache without copying the 1.8 GB model into this repository. In `.env`, set `PARSEC_MODEL_PATH=C:/parsec/models` and set the Gateway URL to an address reachable from Docker Desktop (normally `http://host.docker.internal:8766` for a Gateway published on the Windows host).
 
 GPU:
 
@@ -83,7 +86,7 @@ Mount the model directory through `PARSEC_MODEL_PATH`. Set the Gateway URL to th
 
 ## Pull protocol and lease semantics
 
-The worker API is a proposed Gateway contract and must be implemented in `parsec-media-gateway` before this worker can connect to the current production Gateway. The existing `POST /internal/v1/audio/content` endpoint is already used for audio transfer.
+The worker API contract is implemented in parsec-media-gateway PR #2: durable job creation, worker registration, atomic claim, lease renewal, completion and failure reporting. The PR is still under review and has not been released or deployed. The existing POST /internal/v1/audio/content endpoint is used for audio transfer.
 
 All analysis endpoints use the existing private bearer-token authentication and live below `/internal/`, so the existing Nginx internal-route forwarding rule can protect them.
 
@@ -131,6 +134,17 @@ A successful result contains:
 
 The Gateway validates the lease and forwards the embedding to the Search service. Workers never modify the index directly.
 
+## Container releases
+
+Pushing a semantic version tag such as v0.1.0 runs the release workflow. It builds and publishes both runtime profiles to GHCR:
+
+- ghcr.io/roughzahn/parsec-music-worker:0.1.0-cpu
+- ghcr.io/roughzahn/parsec-music-worker:0.1.0-gpu
+
+The workflow also updates the moving latest-cpu and latest-gpu tags and creates a matching GitHub Release. The CPU and GPU images are released together from the same source revision. No model checkpoint is included in either image.
+
+Set PARSEC_WORKER_VERSION in .env to the numeric release version (for example 0.1.0) to pin both Compose profiles. Use latest only when intentionally tracking the newest release. A release is created by pushing the version tag after the PR has been merged; merging the PR itself does not publish an image.
+
 ## Development and tests
 
 Python 3.11 is used for both images.
@@ -147,4 +161,4 @@ The tests do not download PyTorch or the CLAP model. Full model execution is per
 - Time zone is explicitly set to `Europe/Berlin` in both images and compose profiles.
 - Model files, local environment files, generated embeddings and music files must never be committed.
 - The old one-shot scanner and CSV-based index builder are intentionally not part of this distributed worker. Inventory discovery and index updates belong to the Gateway and Search service respectively.
-- Do not deploy this initial worker against production until the analysis-job endpoints have been implemented and tested in the Gateway.
+- Do not deploy this worker against production until Gateway PR #2 is merged and released, and the full Audio Node → Gateway → worker → Search integration test has passed.
