@@ -41,6 +41,9 @@ class GatewayClient:
             "maxConcurrentJobs": max_concurrent_jobs,
         })
 
+    def unregister(self, worker_id: str):
+        return self._json("DELETE", f"/internal/v1/analysis/workers/{worker_id}")
+
     def claim_job(self, worker_id: str):
         return self._json("POST", f"/internal/v1/analysis/workers/{worker_id}/jobs/claim")
 

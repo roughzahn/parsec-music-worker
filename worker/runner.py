@@ -26,27 +26,38 @@ class Worker:
         self.last_gateway_contact = time.monotonic()
 
     def run(self):
-        self.engine.load()
-        print(f"Registering worker {self.settings.worker_id} ({self.settings.worker_type})", flush=True)
-        self.client.register(self.settings.worker_id, self.settings.worker_type,
-                             self.settings.model_id, self.settings.max_concurrent_jobs)
-        self._mark_gateway_contact()
-        self.ready.set()
-        print("Worker registered; polling for analysis jobs", flush=True)
-        while not self.stopping.is_set():
-            try:
-                job = self.client.claim_job(quote(self.settings.worker_id, safe=""))
-                self._mark_gateway_contact()
-                if not job:
+        registered = False
+        try:
+            self.engine.load()
+            print(f"Registering worker {self.settings.worker_id} ({self.settings.worker_type})", flush=True)
+            self.client.register(self.settings.worker_id, self.settings.worker_type,
+                                 self.settings.model_id, self.settings.max_concurrent_jobs)
+            registered = True
+            self._mark_gateway_contact()
+            self.ready.set()
+            print("Worker registered; polling for analysis jobs", flush=True)
+            while not self.stopping.is_set():
+                try:
+                    job = self.client.claim_job(quote(self.settings.worker_id, safe=""))
+                    self._mark_gateway_contact()
+                    if not job:
+                        self.stopping.wait(self.settings.poll_seconds)
+                        continue
+                    self._process(job)
+                except GatewayError as exc:
+                    print(f"Gateway communication error: {exc}", flush=True)
                     self.stopping.wait(self.settings.poll_seconds)
-                    continue
-                self._process(job)
-            except GatewayError as exc:
-                print(f"Gateway communication error: {exc}", flush=True)
-                self.stopping.wait(self.settings.poll_seconds)
-            except Exception as exc:
-                print(f"Worker loop error: {type(exc).__name__}: {exc}", flush=True)
-                self.stopping.wait(self.settings.poll_seconds)
+                except Exception as exc:
+                    print(f"Worker loop error: {type(exc).__name__}: {exc}", flush=True)
+                    self.stopping.wait(self.settings.poll_seconds)
+        finally:
+            self.ready.clear()
+            if registered:
+                try:
+                    self.client.unregister(quote(self.settings.worker_id, safe=""))
+                    print(f"Worker {self.settings.worker_id} unregistered", flush=True)
+                except Exception as exc:
+                    print(f"Could not unregister worker {self.settings.worker_id}: {exc}", flush=True)
 
     def stop(self):
         self.ready.clear()

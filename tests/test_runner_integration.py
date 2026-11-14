@@ -38,6 +38,7 @@ class FakeEngine:
 def run_worker_integration(fail=False):
     state = {
         "registered": None,
+        "unregistered": None,
         "completion": None,
         "failure": None,
         "claim_count": 0,
@@ -112,6 +113,13 @@ def run_worker_integration(fail=False):
             else:
                 self.send_empty(404)
 
+        def do_DELETE(self):
+            if self.headers.get("Authorization") != "Bearer integration-secret":
+                self.send_empty(401)
+                return
+            state["unregistered"] = self.path
+            self.send_empty()
+
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server_thread = Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -152,6 +160,7 @@ def test_worker_downloads_audio_analyzes_and_completes_job_over_http():
     assert engine.analyzed_bytes == AUDIO_BYTES
     assert state["registered"]["workerId"] == "cpu-integration"
     assert state["registered"]["workerType"] == "CPU"
+    assert state["unregistered"] == "/internal/v1/analysis/workers/cpu-integration"
     assert state["completion"]["leaseToken"] == "lease-test-1"
     assert state["completion"]["result"]["dimensions"] == 512
     assert len(state["completion"]["result"]["embedding"]) == 512
@@ -169,6 +178,7 @@ def test_worker_reports_analysis_failure_to_gateway():
 
     assert engine.analyzed_bytes == AUDIO_BYTES
     assert state["completion"] is None
+    assert state["unregistered"] == "/internal/v1/analysis/workers/cpu-integration"
     assert state["failure"]["leaseToken"] == "lease-test-1"
     assert state["failure"]["retryable"] is True
     assert "synthetic model failure" in state["failure"]["error"]
