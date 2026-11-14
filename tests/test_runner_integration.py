@@ -38,6 +38,8 @@ class FakeEngine:
 def run_worker_integration(fail=False):
     state = {
         "registered": None,
+        "statuses": [],
+        "unregistered": None,
         "completion": None,
         "failure": None,
         "claim_count": 0,
@@ -84,6 +86,9 @@ def run_worker_integration(fail=False):
             if self.path == "/internal/v1/analysis/workers/register":
                 state["registered"] = json.loads(body)
                 self.send_empty()
+            elif self.path == "/internal/v1/analysis/workers/cpu-integration/status":
+                state["statuses"].append(json.loads(body)["status"])
+                self.send_empty()
             elif self.path == "/internal/v1/analysis/workers/cpu-integration/jobs/claim":
                 state["claim_count"] += 1
                 if state["claim_count"] == 1:
@@ -111,6 +116,13 @@ def run_worker_integration(fail=False):
                 self.send_json(200, {"leaseValid": True})
             else:
                 self.send_empty(404)
+
+        def do_DELETE(self):
+            if self.headers.get("Authorization") != "Bearer integration-secret":
+                self.send_empty(401)
+                return
+            state["unregistered"] = self.path
+            self.send_empty()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server_thread = Thread(target=server.serve_forever, daemon=True)
@@ -152,6 +164,9 @@ def test_worker_downloads_audio_analyzes_and_completes_job_over_http():
     assert engine.analyzed_bytes == AUDIO_BYTES
     assert state["registered"]["workerId"] == "cpu-integration"
     assert state["registered"]["workerType"] == "CPU"
+    assert state["registered"]["workerStatus"] == "STARTING"
+    assert "READY" in state["statuses"]
+    assert state["unregistered"] == "/internal/v1/analysis/workers/cpu-integration"
     assert state["completion"]["leaseToken"] == "lease-test-1"
     assert state["completion"]["result"]["dimensions"] == 512
     assert len(state["completion"]["result"]["embedding"]) == 512
@@ -169,6 +184,125 @@ def test_worker_reports_analysis_failure_to_gateway():
 
     assert engine.analyzed_bytes == AUDIO_BYTES
     assert state["completion"] is None
+    assert state["unregistered"] == "/internal/v1/analysis/workers/cpu-integration"
     assert state["failure"]["leaseToken"] == "lease-test-1"
     assert state["failure"]["retryable"] is True
     assert "synthetic model failure" in state["failure"]["error"]
+
+
+def test_worker_registers_as_starting_before_model_load_and_claims_only_when_ready():
+    load_started = threading.Event()
+    allow_load = threading.Event()
+    registered = threading.Event()
+    starting_heartbeat = threading.Event()
+    state = {"registration": None, "statuses": [], "claims": 0, "unregistered": False}
+
+    class RecordingClient:
+        def register(self, worker_id, worker_type, model_id, capacity, worker_status):
+            state["registration"] = worker_status
+            registered.set()
+
+        def update_worker_status(self, worker_id, status):
+            state["statuses"].append(status)
+            if status == "STARTING":
+                starting_heartbeat.set()
+
+        def claim_job(self, worker_id):
+            state["claims"] += 1
+            return None
+
+        def unregister(self, worker_id):
+            state["unregistered"] = True
+
+    class BlockingEngine(FakeEngine):
+        def load(self):
+            load_started.set()
+            assert allow_load.wait(timeout=5)
+            self.loaded = True
+
+    settings = Settings(
+        gateway_url="http://unused",
+        token="test",
+        worker_id="gpu-startup-test",
+        worker_type="gpu",
+        poll_seconds=0.02,
+        heartbeat_seconds=0.05,
+        request_timeout=2,
+        model_path="/unused/in/test",
+        model_id="clap-test-model",
+        max_concurrent_jobs=1,
+    )
+    worker = Worker(settings, RecordingClient(), BlockingEngine())
+    worker_thread = Thread(target=worker.run, daemon=True)
+    worker_thread.start()
+
+    try:
+        assert registered.wait(timeout=2)
+        assert load_started.wait(timeout=2)
+        assert state["registration"] == "STARTING"
+        assert starting_heartbeat.wait(timeout=1)
+        assert not worker.ready.is_set()
+        assert state["claims"] == 0
+
+        allow_load.set()
+        assert worker.ready.wait(timeout=3)
+        assert "READY" in state["statuses"]
+    finally:
+        allow_load.set()
+        worker.stop()
+        worker_thread.join(timeout=3)
+
+    assert not worker_thread.is_alive()
+    assert state["unregistered"] is True
+
+
+def test_worker_stopped_during_model_load_never_transitions_to_ready():
+    load_started = threading.Event()
+    allow_load = threading.Event()
+    state = {"statuses": [], "unregistered": False}
+
+    class RecordingClient:
+        def register(self, worker_id, worker_type, model_id, capacity, worker_status):
+            pass
+
+        def update_worker_status(self, worker_id, status):
+            state["statuses"].append(status)
+
+        def unregister(self, worker_id):
+            state["unregistered"] = True
+
+    class BlockingEngine(FakeEngine):
+        def load(self):
+            load_started.set()
+            assert allow_load.wait(timeout=5)
+            self.loaded = True
+
+    settings = Settings(
+        gateway_url="http://unused",
+        token="test",
+        worker_id="gpu-stopped-during-load",
+        worker_type="gpu",
+        poll_seconds=0.02,
+        heartbeat_seconds=0.05,
+        request_timeout=2,
+        model_path="/unused/in/test",
+        model_id="clap-test-model",
+        max_concurrent_jobs=1,
+    )
+    worker = Worker(settings, RecordingClient(), BlockingEngine())
+    worker_thread = Thread(target=worker.run, daemon=True)
+    worker_thread.start()
+
+    try:
+        assert load_started.wait(timeout=2)
+        worker.stop()
+        allow_load.set()
+        worker_thread.join(timeout=3)
+    finally:
+        allow_load.set()
+        worker.stop()
+        worker_thread.join(timeout=3)
+
+    assert not worker_thread.is_alive()
+    assert "READY" not in state["statuses"]
+    assert state["unregistered"] is True

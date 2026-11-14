@@ -1,3 +1,5 @@
+from urllib.parse import quote
+
 import requests
 
 
@@ -32,14 +34,24 @@ class GatewayClient:
             return None
         return response.json()
 
-    def register(self, worker_id: str, worker_type: str, model_id: str, max_concurrent_jobs: int):
+    def register(self, worker_id: str, worker_type: str, model_id: str, max_concurrent_jobs: int,
+                 worker_status: str = "READY"):
         return self._json("POST", "/internal/v1/analysis/workers/register", json={
             "workerId": worker_id,
             "workerType": worker_type.upper(),
             "capabilities": ["audio-embedding", "clap-embedding-512"],
             "modelId": model_id,
             "maxConcurrentJobs": max_concurrent_jobs,
+            "workerStatus": worker_status.upper(),
         })
+
+    def update_worker_status(self, worker_id: str, status: str):
+        worker_path = quote(worker_id, safe="")
+        return self._json("POST", f"/internal/v1/analysis/workers/{worker_path}/status",
+                          json={"status": status.upper()})
+
+    def unregister(self, worker_id: str):
+        return self._json("DELETE", f"/internal/v1/analysis/workers/{worker_id}")
 
     def claim_job(self, worker_id: str):
         return self._json("POST", f"/internal/v1/analysis/workers/{worker_id}/jobs/claim")
