@@ -86,14 +86,15 @@ Mount the model directory through `PARSEC_MODEL_PATH`. Set the Gateway URL to th
 
 ## Pull protocol and lease semantics
 
-The worker API contract is implemented in parsec-media-gateway PR #2: durable job creation, worker registration, atomic claim, lease renewal, completion and failure reporting. The PR is still under review and has not been released or deployed. The existing POST /internal/v1/audio/content endpoint is used for audio transfer.
+The worker API contract is implemented in `parsec-media-gateway`: durable job creation, worker registration and lifecycle status, atomic claim, lease renewal, completion and failure reporting. Gateway and Worker releases must be coordinated before deployment. The existing `POST /internal/v1/audio/content` endpoint is used for audio transfer.
 
 All analysis endpoints use the existing private bearer-token authentication and live below `/internal/`, so the existing Nginx internal-route forwarding rule can protect them.
 
-Proposed routes:
+Worker routes:
 
-- `POST /internal/v1/analysis/workers/register`: register worker ID, CPU/GPU type, model ID, capabilities and capacity.
-- `POST /internal/v1/analysis/workers/{workerId}/jobs/claim`: atomically reserve one compatible job; return `204` when none is available.
+- `POST /internal/v1/analysis/workers/register`: register worker ID, CPU/GPU type, model ID, capabilities, capacity and initial `workerStatus` (`STARTING` or `READY`). Legacy clients omitting the field default to `READY`.
+- `POST /internal/v1/analysis/workers/{workerId}/status`: publish `STARTING` or `READY` and renew the worker registration heartbeat. A worker must remain `STARTING` until model loading and runtime initialization have completed.
+- `POST /internal/v1/analysis/workers/{workerId}/jobs/claim`: atomically reserve one compatible job; return `204` when none is available. Only `READY` workers can claim jobs.
 - `POST /internal/v1/analysis/workers/{workerId}/jobs/{jobId}/heartbeat`: renew the lease using its opaque `leaseToken`.
 - `POST /internal/v1/analysis/workers/{workerId}/jobs/{jobId}/complete`: submit embedding and source metadata.
 - `POST /internal/v1/analysis/workers/{workerId}/jobs/{jobId}/fail`: report failure and whether retry is appropriate.

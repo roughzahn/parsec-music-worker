@@ -14,6 +14,9 @@ class Worker:
         self.engine = engine
         self.stopping = threading.Event()
         self.ready = threading.Event()
+        self.worker_status_lock = threading.Lock()
+        self.worker_status = "STARTING"
+        self.registration_heartbeat_stop = threading.Event()
         self.last_gateway_contact = None
 
     def is_ready(self):
@@ -27,15 +30,34 @@ class Worker:
 
     def run(self):
         registered = False
+        status_stop = self.registration_heartbeat_stop
+        status_thread = None
         try:
-            self.engine.load()
-            print(f"Registering worker {self.settings.worker_id} ({self.settings.worker_type})", flush=True)
+            print(f"Registering worker {self.settings.worker_id} ({self.settings.worker_type}) as STARTING", flush=True)
             self.client.register(self.settings.worker_id, self.settings.worker_type,
-                                 self.settings.model_id, self.settings.max_concurrent_jobs)
+                                 self.settings.model_id, self.settings.max_concurrent_jobs,
+                                 worker_status="STARTING")
             registered = True
             self._mark_gateway_contact()
+            status_thread = threading.Thread(
+                target=self._registration_heartbeat_loop, args=(status_stop,),
+                name=f"worker-status-{self.settings.worker_id}", daemon=True)
+            status_thread.start()
+
+            print("Loading CLAP model and initializing runtime", flush=True)
+            self.engine.load()
+            if self.stopping.is_set():
+                return
+            with self.worker_status_lock:
+                self.worker_status = "READY"
+                try:
+                    self.client.update_worker_status(self.settings.worker_id, "READY")
+                    self._mark_gateway_contact()
+                except Exception:
+                    self.worker_status = "STARTING"
+                    raise
             self.ready.set()
-            print("Worker registered; polling for analysis jobs", flush=True)
+            print("Worker is READY; polling for analysis jobs", flush=True)
             while not self.stopping.is_set():
                 try:
                     job = self.client.claim_job(quote(self.settings.worker_id, safe=""))
@@ -52,6 +74,9 @@ class Worker:
                     self.stopping.wait(self.settings.poll_seconds)
         finally:
             self.ready.clear()
+            status_stop.set()
+            if status_thread is not None:
+                status_thread.join(timeout=2)
             if registered:
                 try:
                     self.client.unregister(quote(self.settings.worker_id, safe=""))
@@ -59,9 +84,19 @@ class Worker:
                 except Exception as exc:
                     print(f"Could not unregister worker {self.settings.worker_id}: {exc}", flush=True)
 
+    def _registration_heartbeat_loop(self, stop_event):
+        while not stop_event.wait(self.settings.heartbeat_seconds):
+            try:
+                with self.worker_status_lock:
+                    self.client.update_worker_status(self.settings.worker_id, self.worker_status)
+                    self._mark_gateway_contact()
+            except Exception as exc:
+                print(f"Worker status heartbeat warning: {exc}", flush=True)
+
     def stop(self):
         self.ready.clear()
         self.stopping.set()
+        self.registration_heartbeat_stop.set()
 
     def _process(self, job: dict):
         job_id = str(job["jobId"])
