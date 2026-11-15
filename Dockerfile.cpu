@@ -1,6 +1,10 @@
 FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1 TZ=Europe/Berlin
+ENV PYTHONUNBUFFERED=1 TZ=Europe/Berlin \
+    OMP_NUM_THREADS=2 \
+    MKL_NUM_THREADS=2 \
+    OPENBLAS_NUM_THREADS=2 \
+    NUMEXPR_NUM_THREADS=2
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements-common.txt .

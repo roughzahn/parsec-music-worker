@@ -12,6 +12,7 @@ class ClapEngine:
         self.model_path = model_path
         self.model_id = model_id
         self.model = None
+        self.torch = None
 
     def load(self):
         import torch
@@ -22,13 +23,23 @@ class ClapEngine:
         if self.device == "gpu" and not torch.cuda.is_available():
             raise RuntimeError("GPU worker requested but CUDA is not available")
         runtime_device = "cuda" if self.device == "gpu" else "cpu"
+        if runtime_device == "cpu":
+            torch_threads = max(1, int(os.getenv("PARSEC_TORCH_NUM_THREADS", "2")))
+            torch_interop_threads = max(1, int(os.getenv("PARSEC_TORCH_INTEROP_THREADS", "1")))
+            torch.set_num_threads(torch_threads)
+            torch.set_num_interop_threads(torch_interop_threads)
+            print(
+                f"PyTorch CPU threads: intra-op={torch_threads}, inter-op={torch_interop_threads}",
+                flush=True,
+            )
+        self.torch = torch
         self.model = laion_clap.CLAP_Module(enable_fusion=False, device=runtime_device)
         self.model.load_ckpt(ckpt=self.model_path, verbose=False)
         print(f"CLAP model ready on {runtime_device}: {self.model_id}", flush=True)
         return self
 
     def analyze(self, audio_path: str) -> dict:
-        if self.model is None:
+        if self.model is None or self.torch is None:
             raise RuntimeError("Model has not been loaded")
         started = time.perf_counter()
         with tempfile.TemporaryDirectory(prefix="parsec-worker-") as temp_dir:
@@ -40,7 +51,8 @@ class ClapEngine:
             )
             if converted.returncode != 0:
                 raise RuntimeError(f"ffmpeg conversion failed: {converted.stderr[-1000:]}")
-            vectors = self.model.get_audio_embedding_from_filelist(x=[wav_path])
+            with self.torch.inference_mode():
+                vectors = self.model.get_audio_embedding_from_filelist(x=[wav_path])
         vector = np.asarray(vectors[0], dtype=np.float32).reshape(-1)
         if vector.size != 512:
             raise RuntimeError(f"Unexpected embedding dimension: {vector.size}; expected 512")
