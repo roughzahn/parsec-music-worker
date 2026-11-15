@@ -76,7 +76,7 @@ class Worker:
                     self._process(job)
                 except GatewayError as exc:
                     print(f"Gateway communication error: {exc}", flush=True)
-                    if exc.status_code in (401, 403):
+                    if self.settings.worker_type == "gpu" and exc.status_code in (401, 403):
                         print("GPU worker session is no longer valid; stopping. Restart and approve the new pairing request.", flush=True)
                         self.stop()
                     else:
@@ -106,7 +106,7 @@ class Worker:
                     self._mark_gateway_contact()
             except GatewayError as exc:
                 print(f"Worker session heartbeat warning: {exc}", flush=True)
-                if exc.status_code in (401, 403):
+                if self.settings.worker_type == "gpu" and exc.status_code in (401, 403):
                     print("GPU worker session expired; stopping for a fresh manual pairing.", flush=True)
                     self.stop()
                     return
@@ -165,10 +165,10 @@ class Worker:
             self.client.complete_job(self.settings.worker_id, job_id, lease_token, result)
             print(f"Completed job {job_id} ({result['processingSeconds']}s)", flush=True)
         except Exception as exc:
-            if isinstance(exc, GatewayError) and exc.status_code in (401, 403):
+            if self.settings.worker_type == "gpu" and isinstance(exc, GatewayError) and exc.status_code in (401, 403):
                 print("GPU worker authorization expired while processing; stopping for re-approval.", flush=True)
                 self.stop()
-            if not lease_lost.is_set() and not (isinstance(exc, GatewayError) and exc.status_code in (401, 403)):
+            if not lease_lost.is_set() and not (self.settings.worker_type == "gpu" and isinstance(exc, GatewayError) and exc.status_code in (401, 403)):
                 try:
                     self.client.fail_job(self.settings.worker_id, job_id, lease_token,
                                          f"{type(exc).__name__}: {exc}", retryable=True)
