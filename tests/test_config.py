@@ -46,3 +46,12 @@ def test_cpu_profile_still_requires_static_token(monkeypatch):
 
     with pytest.raises(ValueError, match="CPU workers require"):
         Settings.from_env()
+
+
+def test_gpu_profile_ignores_legacy_static_token(monkeypatch):
+    monkeypatch.setenv("PARSEC_WORKER_TYPE", "gpu")
+    monkeypatch.setenv("PARSEC_WORKER_TOKEN", "old-shared-secret")
+
+    settings = Settings.from_env()
+
+    assert settings.token == ""
