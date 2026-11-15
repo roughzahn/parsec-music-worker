@@ -2,8 +2,6 @@ import os
 import tempfile
 import threading
 import time
-from urllib.parse import quote
-
 from .gateway_client import GatewayClient, GatewayError
 
 
@@ -68,7 +66,7 @@ class Worker:
             print("Worker is READY; polling for analysis jobs", flush=True)
             while not self.stopping.is_set():
                 try:
-                    job = self.client.claim_job(quote(self.settings.worker_id, safe=""))
+                    job = self.client.claim_job(self.settings.worker_id)
                     self._mark_gateway_contact()
                     if not job:
                         self.stopping.wait(self.settings.poll_seconds)
@@ -91,7 +89,7 @@ class Worker:
                 status_thread.join(timeout=2)
             if registered:
                 try:
-                    self.client.unregister(quote(self.settings.worker_id, safe=""))
+                    self.client.unregister(self.settings.worker_id)
                     print(f"Worker {self.settings.worker_id} unregistered", flush=True)
                 except Exception as exc:
                     print(f"Could not unregister worker {self.settings.worker_id}: {exc}", flush=True)
