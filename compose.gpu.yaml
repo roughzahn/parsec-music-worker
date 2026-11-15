@@ -9,9 +9,9 @@ services:
     environment:
       TZ: Europe/Berlin
       PARSEC_GATEWAY_BASE_URL: ${PARSEC_GATEWAY_BASE_URL:?Set PARSEC_GATEWAY_BASE_URL}
-      PARSEC_WORKER_TOKEN: ${PARSEC_WORKER_TOKEN:?Set PARSEC_WORKER_TOKEN}
       PARSEC_WORKER_ID: ${PARSEC_WORKER_ID:-gpu-${HOSTNAME}}
       PARSEC_WORKER_TYPE: gpu
+      PARSEC_WORKER_HEALTH_PORT: "8081"
       PARSEC_CLAP_MODEL_PATH: /models/630k-audioset-best.pt
     volumes:
       - C:/parsec/models:/models:ro
