@@ -7,8 +7,8 @@ Distributed CPU/GPU worker for generating 512-dimensional LAION-CLAP audio embed
 The worker is intentionally a pull-only execution agent:
 
 - Registers its identity, runtime type and capabilities with the Gateway.
-- Claims one available analysis job.
-- Renews the job lease while it is working.
+- CPU claims one analysis job at a time; GPU prefetches a configurable queue of jobs from the Gateway.
+- Renews every reserved job lease while downloads and batched inference are running.
 - Downloads the requested audio through the Gateway's existing private reverse-audio endpoint.
 - Generates a 512-dimensional LAION-CLAP embedding.
 - Submits the result or reports a failure.
@@ -26,7 +26,7 @@ Both profiles use the same Python application and analysis implementation. Only 
 | Profile | Runtime | Intended use |
 |---|---|---|
 | `cpu` | PyTorch CPU | Small incremental updates; CPU-only hosts |
-| `gpu` | PyTorch CUDA 12.8 | Large batches and full-library analysis |
+| `gpu` | PyTorch CUDA 12.8 | Batched CLAP inference and full-library reindexing |
 
 The model checkpoint is supplied as a read-only host volume. It is not included in the image or Git.
 
@@ -51,8 +51,10 @@ Additional runtime settings:
 
 - `PARSEC_WORKER_TYPE`: `cpu` or `gpu` (set by the compose profile).
 - `PARSEC_WORKER_POLL_SECONDS`: delay after an empty queue (default 3).
-- `PARSEC_WORKER_HEARTBEAT_SECONDS`: lease renewal interval (default 20).
-- `PARSEC_WORKER_MAX_CONCURRENT_JOBS`: advertised capacity (default 1; this first implementation executes sequentially).
+- `PARSEC_WORKER_HEARTBEAT_SECONDS`: lease renewal interval (CPU: 20 seconds; GPU: 10 seconds).
+- `PARSEC_WORKER_MAX_CONCURRENT_JOBS`: advertised Gateway reservation capacity (CPU: 1; GPU: same value as prefetch size).
+- `PARSEC_GPU_PREFETCH_BATCH_SIZE`: maximum number of GPU jobs reserved ahead (default 20; range 1–50).
+- `PARSEC_GPU_INFERENCE_BATCH_SIZE`: number of audio files passed to CLAP in one GPU inference call (default 4; must not exceed prefetch size).
 - `PARSEC_CLAP_MODEL_PATH`: model path inside the container.
 - `PARSEC_CLAP_MODEL_ID`: embedding model identifier.
 
@@ -120,7 +122,7 @@ The Gateway reserves the job atomically before returning it. The worker renews i
 
 The worker fetches exactly `sizeBytes` from the existing `POST /internal/v1/audio/content` endpoint. The Gateway uses the reverse Audio Node connection to retrieve bytes from the NAS, so a NAS behind NAT never needs an inbound port.
 
-The first implementation runs one job at a time per process. Running multiple containers or hosts concurrently is supported by unique worker IDs and Gateway-side atomic reservations.
+CPU workers continue to execute one job at a time. GPU workers reserve up to 20 jobs by default, keep each lease alive independently, and process the files in inference batches of 4 by default. Each job is still completed or failed independently. Running multiple containers or hosts concurrently is supported by unique worker IDs and Gateway-side atomic reservations.
 
 ## Result contract
 

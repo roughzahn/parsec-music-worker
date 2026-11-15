@@ -39,30 +39,93 @@ class ClapEngine:
         return self
 
     def analyze(self, audio_path: str) -> dict:
+        result = self.analyze_batch([audio_path])[0]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def analyze_batch(self, audio_paths: list[str]) -> list[dict | Exception]:
         if self.model is None or self.torch is None:
             raise RuntimeError("Model has not been loaded")
+        if not audio_paths:
+            return []
+
         started = time.perf_counter()
-        with tempfile.TemporaryDirectory(prefix="parsec-worker-") as temp_dir:
-            wav_path = os.path.join(temp_dir, "audio.wav")
-            converted = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", audio_path,
-                 "-ar", "48000", "-ac", "1", "-f", "wav", wav_path],
-                check=False, capture_output=True, text=True,
+        results: list[dict | Exception | None] = [None] * len(audio_paths)
+        with tempfile.TemporaryDirectory(prefix="parsec-worker-batch-") as temp_dir:
+            wav_paths = []
+            valid_indices = []
+            for index, audio_path in enumerate(audio_paths):
+                wav_path = os.path.join(temp_dir, f"audio-{index}.wav")
+                try:
+                    converted = subprocess.run(
+                        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", audio_path,
+                         "-ar", "48000", "-ac", "1", "-f", "wav", wav_path],
+                        check=False, capture_output=True, text=True,
+                    )
+                    if converted.returncode != 0:
+                        results[index] = RuntimeError(
+                            f"ffmpeg conversion failed: {converted.stderr[-1000:]}"
+                        )
+                    else:
+                        wav_paths.append(wav_path)
+                        valid_indices.append(index)
+                except Exception as error:
+                    results[index] = error
+
+            if wav_paths:
+                try:
+                    with self.torch.inference_mode():
+                        vectors = self.model.get_audio_embedding_from_filelist(x=wav_paths)
+                    self._assign_vectors(results, valid_indices, vectors, started)
+                except Exception as batch_error:
+                    # An OOM may leave cached allocations behind; clear them before single-file fallback.
+                    if self.device == "gpu" and hasattr(self.torch, "cuda"):
+                        self.torch.cuda.empty_cache()
+                    print(
+                        f"CLAP batch inference failed ({type(batch_error).__name__}: {batch_error}); "
+                        "retrying files individually",
+                        flush=True,
+                    )
+                    for wav_path, index in zip(wav_paths, valid_indices):
+                        try:
+                            with self.torch.inference_mode():
+                                vectors = self.model.get_audio_embedding_from_filelist(x=[wav_path])
+                            self._assign_vectors(results, [index], vectors, started)
+                        except Exception as error:
+                            results[index] = error
+
+        elapsed = round(time.perf_counter() - started, 3)
+        return [
+            result if isinstance(result, Exception) else {
+                **result,
+                "processingSeconds": elapsed,
+            }
+            for result in results
+        ]
+
+    def _assign_vectors(self, results, indices, vectors, started):
+        array = np.asarray(vectors, dtype=np.float32)
+        if array.ndim == 1 and len(indices) == 1:
+            array = array.reshape(1, -1)
+        if array.ndim != 2 or array.shape[0] != len(indices):
+            raise RuntimeError(
+                f"Unexpected CLAP batch shape: {array.shape}; expected ({len(indices)}, 512)"
             )
-            if converted.returncode != 0:
-                raise RuntimeError(f"ffmpeg conversion failed: {converted.stderr[-1000:]}")
-            with self.torch.inference_mode():
-                vectors = self.model.get_audio_embedding_from_filelist(x=[wav_path])
-        vector = np.asarray(vectors[0], dtype=np.float32).reshape(-1)
-        if vector.size != 512:
-            raise RuntimeError(f"Unexpected embedding dimension: {vector.size}; expected 512")
-        if not np.isfinite(vector).all():
-            raise RuntimeError("Embedding contains NaN or infinite values")
-        return {
-            "modelId": self.model_id,
-            "embeddingVersion": 1,
-            "dimensions": int(vector.size),
-            "embedding": vector.tolist(),
-            "processingSeconds": round(time.perf_counter() - started, 3),
-            "runtime": self.device,
-        }
+        for row, index in zip(array, indices):
+            vector = row.reshape(-1)
+            if vector.size != 512:
+                results[index] = RuntimeError(
+                    f"Unexpected embedding dimension: {vector.size}; expected 512"
+                )
+            elif not np.isfinite(vector).all():
+                results[index] = RuntimeError("Embedding contains NaN or infinite values")
+            else:
+                results[index] = {
+                    "modelId": self.model_id,
+                    "embeddingVersion": 1,
+                    "dimensions": int(vector.size),
+                    "embedding": vector.tolist(),
+                    "processingSeconds": round(time.perf_counter() - started, 3),
+                    "runtime": self.device,
+                }
