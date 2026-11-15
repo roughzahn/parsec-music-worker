@@ -64,14 +64,27 @@ class Worker:
                     raise
             self.ready.set()
             print("Worker is READY; polling for analysis jobs", flush=True)
+            if self.settings.worker_type == "gpu":
+                print(
+                    f"GPU batching enabled: prefetch={self.settings.prefetch_batch_size}, "
+                    f"inference_batch={self.settings.inference_batch_size}",
+                    flush=True,
+                )
             while not self.stopping.is_set():
                 try:
-                    job = self.client.claim_job(self.settings.worker_id)
-                    self._mark_gateway_contact()
-                    if not job:
-                        self.stopping.wait(self.settings.poll_seconds)
-                        continue
-                    self._process(job)
+                    if self.settings.worker_type == "gpu":
+                        jobs = self._claim_batch()
+                        if not jobs:
+                            self.stopping.wait(self.settings.poll_seconds)
+                            continue
+                        self._process_batch(jobs)
+                    else:
+                        job = self.client.claim_job(self.settings.worker_id)
+                        self._mark_gateway_contact()
+                        if not job:
+                            self.stopping.wait(self.settings.poll_seconds)
+                            continue
+                        self._process(job)
                 except GatewayError as exc:
                     print(f"Gateway communication error: {exc}", flush=True)
                     if self.settings.worker_type == "gpu" and exc.status_code in (401, 403):
@@ -93,6 +106,20 @@ class Worker:
                     print(f"Worker {self.settings.worker_id} unregistered", flush=True)
                 except Exception as exc:
                     print(f"Could not unregister worker {self.settings.worker_id}: {exc}", flush=True)
+
+    def _claim_batch(self):
+        jobs = []
+        for _ in range(self.settings.prefetch_batch_size):
+            if self.stopping.is_set():
+                break
+            job = self.client.claim_job(self.settings.worker_id)
+            self._mark_gateway_contact()
+            if not job:
+                break
+            jobs.append(job)
+        if jobs:
+            print(f"Reserved {len(jobs)} GPU jobs", flush=True)
+        return jobs
 
     def _registration_heartbeat_loop(self, stop_event):
         while not stop_event.wait(self.settings.heartbeat_seconds):
@@ -116,12 +143,9 @@ class Worker:
         self.stopping.set()
         self.registration_heartbeat_stop.set()
 
-    def _process(self, job: dict):
+    def _start_job_heartbeat(self, job):
         job_id = str(job["jobId"])
         lease_token = str(job["leaseToken"])
-        audio = job["audio"]
-        audio_path = str(audio["path"])
-        expected_size = int(audio["sizeBytes"])
         lease_lost = threading.Event()
         heartbeat_stop = threading.Event()
 
@@ -139,12 +163,128 @@ class Worker:
                         lease_lost.set()
                         print(f"Lease expired for job {job_id}", flush=True)
                         return
+                    if self.settings.worker_type == "gpu" and exc.status_code in (401, 403):
+                        self.stop()
+                        lease_lost.set()
+                        print("GPU worker authorization expired during lease heartbeat.", flush=True)
+                        return
                     print(f"Heartbeat warning for {job_id}: {exc}", flush=True)
                 except Exception as exc:
                     print(f"Heartbeat warning for {job_id}: {exc}", flush=True)
 
         heartbeat = threading.Thread(target=heartbeat_loop, name=f"heartbeat-{job_id}", daemon=True)
         heartbeat.start()
+        return heartbeat_stop, lease_lost, heartbeat
+
+    @staticmethod
+    def _audio_metadata(job):
+        audio = job["audio"]
+        return {
+            "path": str(audio["path"]),
+            "sizeBytes": int(audio["sizeBytes"]),
+            "lastModifiedUtc": audio.get("lastModifiedUtc"),
+            "contentHash": audio.get("contentHash"),
+        }
+
+    def _process_batch(self, jobs):
+        heartbeats = {}
+        downloaded = {}
+        outcomes = {}
+        try:
+            for job in jobs:
+                job_id = str(job["jobId"])
+                heartbeats[job_id] = self._start_job_heartbeat(job)
+
+            with tempfile.TemporaryDirectory(prefix="parsec-gpu-batch-") as temp_dir:
+                for index, job in enumerate(jobs):
+                    job_id = str(job["jobId"])
+                    if self.stopping.is_set():
+                        outcomes[job_id] = RuntimeError("Worker is stopping")
+                        continue
+                    if heartbeats[job_id][1].is_set():
+                        continue
+                    audio = job["audio"]
+                    source = os.path.join(temp_dir, f"source-{index}")
+                    try:
+                        self.client.download_audio(
+                            str(audio["path"]), int(audio["sizeBytes"]), source
+                        )
+                        self._mark_gateway_contact()
+                        downloaded[job_id] = source
+                    except Exception as exc:
+                        outcomes[job_id] = exc
+
+                valid_jobs = [
+                    job for job in jobs
+                    if str(job["jobId"]) in downloaded
+                    and not heartbeats[str(job["jobId"])][1].is_set()
+                ]
+                for offset in range(0, len(valid_jobs), self.settings.inference_batch_size):
+                    chunk = valid_jobs[offset:offset + self.settings.inference_batch_size]
+                    try:
+                        if hasattr(self.engine, "analyze_batch"):
+                            chunk_results = self.engine.analyze_batch(
+                                [downloaded[str(job["jobId"])] for job in chunk]
+                            )
+                        else:
+                            chunk_results = [
+                                self.engine.analyze(downloaded[str(job["jobId"])])
+                                for job in chunk
+                            ]
+                        if len(chunk_results) != len(chunk):
+                            raise RuntimeError("CLAP returned an unexpected number of batch results")
+                        for job, result in zip(chunk, chunk_results):
+                            outcomes[str(job["jobId"])] = result
+                    except Exception as exc:
+                        for job in chunk:
+                            outcomes[str(job["jobId"])] = exc
+
+            for job in jobs:
+                job_id = str(job["jobId"])
+                lease_lost = heartbeats[job_id][1]
+                if lease_lost.is_set():
+                    print(f"Discarding result for expired lease {job_id}", flush=True)
+                    continue
+                if self.stopping.is_set():
+                    continue
+                outcome = outcomes.get(job_id, RuntimeError("No analysis result was produced"))
+                lease_token = str(job["leaseToken"])
+                try:
+                    if isinstance(outcome, Exception):
+                        raise outcome
+                    result = dict(outcome)
+                    result["audio"] = self._audio_metadata(job)
+                    self.client.complete_job(self.settings.worker_id, job_id, lease_token, result)
+                    self._mark_gateway_contact()
+                    print(
+                        f"Completed job {job_id} ({result.get('processingSeconds', 0)}s)",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    if isinstance(exc, GatewayError) and exc.status_code in (401, 403):
+                        print("GPU worker authorization expired while processing; stopping for re-approval.", flush=True)
+                        self.stop()
+                    elif not lease_lost.is_set():
+                        try:
+                            self.client.fail_job(
+                                self.settings.worker_id, job_id, lease_token,
+                                f"{type(exc).__name__}: {exc}", retryable=True,
+                            )
+                        except Exception as report_error:
+                            print(f"Could not report job failure {job_id}: {report_error}", flush=True)
+                    print(f"Job {job_id} failed: {type(exc).__name__}: {exc}", flush=True)
+        finally:
+            for heartbeat_stop, _, heartbeat in heartbeats.values():
+                heartbeat_stop.set()
+                heartbeat.join(timeout=2)
+
+    def _process(self, job: dict):
+        job_id = str(job["jobId"])
+        lease_token = str(job["leaseToken"])
+        audio = job["audio"]
+        audio_path = str(audio["path"])
+        expected_size = int(audio["sizeBytes"])
+        heartbeat_stop, lease_lost, heartbeat = self._start_job_heartbeat(job)
         print(f"Claimed job {job_id}: {audio_path}", flush=True)
         try:
             with tempfile.TemporaryDirectory(prefix="parsec-job-") as temp_dir:
@@ -154,12 +294,7 @@ class Worker:
             if lease_lost.is_set():
                 print(f"Discarding result for expired lease {job_id}", flush=True)
                 return
-            result["audio"] = {
-                "path": audio_path,
-                "sizeBytes": expected_size,
-                "lastModifiedUtc": audio.get("lastModifiedUtc"),
-                "contentHash": audio.get("contentHash"),
-            }
+            result["audio"] = self._audio_metadata(job)
             self.client.complete_job(self.settings.worker_id, job_id, lease_token, result)
             print(f"Completed job {job_id} ({result['processingSeconds']}s)", flush=True)
         except Exception as exc:
