@@ -198,14 +198,18 @@ def test_worker_registers_as_starting_before_model_load_and_claims_only_when_rea
     state = {"registration": None, "statuses": [], "claims": 0, "unregistered": False}
 
     class RecordingClient:
-        def register(self, worker_id, worker_type, model_id, capacity, worker_status):
+        def register(self, worker_id, worker_type, model_id, capacity, worker_status, stop_event=None):
             state["registration"] = worker_status
             registered.set()
+            return True
 
         def update_worker_status(self, worker_id, status):
             state["statuses"].append(status)
             if status == "STARTING":
                 starting_heartbeat.set()
+
+        def session_heartbeat(self, worker_id):
+            pass
 
         def claim_job(self, worker_id):
             state["claims"] += 1
@@ -262,11 +266,14 @@ def test_worker_stopped_during_model_load_never_transitions_to_ready():
     state = {"statuses": [], "unregistered": False}
 
     class RecordingClient:
-        def register(self, worker_id, worker_type, model_id, capacity, worker_status):
-            pass
+        def register(self, worker_id, worker_type, model_id, capacity, worker_status, stop_event=None):
+            return True
 
         def update_worker_status(self, worker_id, status):
             state["statuses"].append(status)
+
+        def session_heartbeat(self, worker_id):
+            pass
 
         def unregister(self, worker_id):
             state["unregistered"] = True

@@ -6,7 +6,7 @@ import socket
 @dataclass(frozen=True)
 class Settings:
     gateway_url: str
-    token: str
+    token: str | None
     worker_id: str
     worker_type: str
     poll_seconds: float
@@ -23,8 +23,10 @@ class Settings:
         if worker_type not in {"cpu", "gpu"}:
             raise ValueError("PARSEC_WORKER_TYPE must be cpu or gpu")
         token = os.getenv("PARSEC_WORKER_TOKEN") or os.getenv("PARSEC_AUDIO_TRANSPORT_TOKEN", "")
-        if not token.strip():
-            raise ValueError("PARSEC_WORKER_TOKEN (or PARSEC_AUDIO_TRANSPORT_TOKEN) is required")
+        if worker_type == "gpu":
+            token = ""  # GPU authorization is acquired through one-time Admin pairing.
+        if worker_type == "cpu" and not token.strip():
+            raise ValueError("CPU workers require PARSEC_WORKER_TOKEN (or PARSEC_AUDIO_TRANSPORT_TOKEN)")
         worker_id = os.getenv("PARSEC_WORKER_ID", socket.gethostname()).strip()
         if not worker_id:
             raise ValueError("PARSEC_WORKER_ID must not be empty")
@@ -37,7 +39,7 @@ class Settings:
             worker_id=worker_id,
             worker_type=worker_type,
             poll_seconds=float(os.getenv("PARSEC_WORKER_POLL_SECONDS", "3")),
-            heartbeat_seconds=float(os.getenv("PARSEC_WORKER_HEARTBEAT_SECONDS", "20")),
+            heartbeat_seconds=float(os.getenv("PARSEC_WORKER_HEARTBEAT_SECONDS", "10" if worker_type == "gpu" else "20")),
             request_timeout=float(os.getenv("PARSEC_WORKER_REQUEST_TIMEOUT", "60")),
             model_path=os.getenv("PARSEC_CLAP_MODEL_PATH", "/models/630k-audioset-best.pt"),
             model_id=os.getenv("PARSEC_CLAP_MODEL_ID", "laion-clap-630k-audioset-v1"),

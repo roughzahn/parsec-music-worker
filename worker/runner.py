@@ -2,8 +2,6 @@ import os
 import tempfile
 import threading
 import time
-from urllib.parse import quote
-
 from .gateway_client import GatewayClient, GatewayError
 
 
@@ -34,10 +32,18 @@ class Worker:
         status_thread = None
         try:
             print(f"Registering worker {self.settings.worker_id} ({self.settings.worker_type}) as STARTING", flush=True)
-            self.client.register(self.settings.worker_id, self.settings.worker_type,
-                                 self.settings.model_id, self.settings.max_concurrent_jobs,
-                                 worker_status="STARTING")
-            registered = True
+            if self.settings.worker_type == "gpu":
+                registered = self.client.register(
+                    self.settings.worker_id, self.settings.worker_type,
+                    self.settings.model_id, self.settings.max_concurrent_jobs,
+                    worker_status="STARTING", stop_event=self.stopping)
+            else:
+                self.client.register(self.settings.worker_id, self.settings.worker_type,
+                                     self.settings.model_id, self.settings.max_concurrent_jobs,
+                                     worker_status="STARTING")
+                registered = True
+            if not registered:
+                return
             self._mark_gateway_contact()
             status_thread = threading.Thread(
                 target=self._registration_heartbeat_loop, args=(status_stop,),
@@ -60,7 +66,7 @@ class Worker:
             print("Worker is READY; polling for analysis jobs", flush=True)
             while not self.stopping.is_set():
                 try:
-                    job = self.client.claim_job(quote(self.settings.worker_id, safe=""))
+                    job = self.client.claim_job(self.settings.worker_id)
                     self._mark_gateway_contact()
                     if not job:
                         self.stopping.wait(self.settings.poll_seconds)
@@ -68,7 +74,11 @@ class Worker:
                     self._process(job)
                 except GatewayError as exc:
                     print(f"Gateway communication error: {exc}", flush=True)
-                    self.stopping.wait(self.settings.poll_seconds)
+                    if self.settings.worker_type == "gpu" and exc.status_code in (401, 403):
+                        print("GPU worker session is no longer valid; stopping. Restart and approve the new pairing request.", flush=True)
+                        self.stop()
+                    else:
+                        self.stopping.wait(self.settings.poll_seconds)
                 except Exception as exc:
                     print(f"Worker loop error: {type(exc).__name__}: {exc}", flush=True)
                     self.stopping.wait(self.settings.poll_seconds)
@@ -79,7 +89,7 @@ class Worker:
                 status_thread.join(timeout=2)
             if registered:
                 try:
-                    self.client.unregister(quote(self.settings.worker_id, safe=""))
+                    self.client.unregister(self.settings.worker_id)
                     print(f"Worker {self.settings.worker_id} unregistered", flush=True)
                 except Exception as exc:
                     print(f"Could not unregister worker {self.settings.worker_id}: {exc}", flush=True)
@@ -89,7 +99,15 @@ class Worker:
             try:
                 with self.worker_status_lock:
                     self.client.update_worker_status(self.settings.worker_id, self.worker_status)
+                    if self.settings.worker_type == "gpu":
+                        self.client.session_heartbeat(self.settings.worker_id)
                     self._mark_gateway_contact()
+            except GatewayError as exc:
+                print(f"Worker session heartbeat warning: {exc}", flush=True)
+                if self.settings.worker_type == "gpu" and exc.status_code in (401, 403):
+                    print("GPU worker session expired; stopping for a fresh manual pairing.", flush=True)
+                    self.stop()
+                    return
             except Exception as exc:
                 print(f"Worker status heartbeat warning: {exc}", flush=True)
 
@@ -145,7 +163,10 @@ class Worker:
             self.client.complete_job(self.settings.worker_id, job_id, lease_token, result)
             print(f"Completed job {job_id} ({result['processingSeconds']}s)", flush=True)
         except Exception as exc:
-            if not lease_lost.is_set():
+            if self.settings.worker_type == "gpu" and isinstance(exc, GatewayError) and exc.status_code in (401, 403):
+                print("GPU worker authorization expired while processing; stopping for re-approval.", flush=True)
+                self.stop()
+            if not lease_lost.is_set() and not (self.settings.worker_type == "gpu" and isinstance(exc, GatewayError) and exc.status_code in (401, 403)):
                 try:
                     self.client.fail_job(self.settings.worker_id, job_id, lease_token,
                                          f"{type(exc).__name__}: {exc}", retryable=True)
