@@ -34,10 +34,18 @@ class Worker:
         status_thread = None
         try:
             print(f"Registering worker {self.settings.worker_id} ({self.settings.worker_type}) as STARTING", flush=True)
-            self.client.register(self.settings.worker_id, self.settings.worker_type,
-                                 self.settings.model_id, self.settings.max_concurrent_jobs,
-                                 worker_status="STARTING")
-            registered = True
+            if self.settings.worker_type == "gpu":
+                registered = self.client.register(
+                    self.settings.worker_id, self.settings.worker_type,
+                    self.settings.model_id, self.settings.max_concurrent_jobs,
+                    worker_status="STARTING", stop_event=self.stopping)
+            else:
+                self.client.register(self.settings.worker_id, self.settings.worker_type,
+                                     self.settings.model_id, self.settings.max_concurrent_jobs,
+                                     worker_status="STARTING")
+                registered = True
+            if not registered:
+                return
             self._mark_gateway_contact()
             status_thread = threading.Thread(
                 target=self._registration_heartbeat_loop, args=(status_stop,),
@@ -89,6 +97,8 @@ class Worker:
             try:
                 with self.worker_status_lock:
                     self.client.update_worker_status(self.settings.worker_id, self.worker_status)
+                    if self.settings.worker_type == "gpu":
+                        self.client.session_heartbeat(self.settings.worker_id)
                     self._mark_gateway_contact()
             except Exception as exc:
                 print(f"Worker status heartbeat warning: {exc}", flush=True)
