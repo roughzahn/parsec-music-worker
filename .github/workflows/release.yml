@@ -107,6 +107,7 @@ jobs:
           tags: |
             type=raw,value=${{ steps.version.outputs.version }}-cpu
             type=raw,value=latest-cpu
+            type=raw,value=stable-cpu
 
       - name: Build and push CPU image
         uses: docker/build-push-action@v6
@@ -127,6 +128,7 @@ jobs:
           tags: |
             type=raw,value=${{ steps.version.outputs.version }}-gpu
             type=raw,value=latest-gpu
+            type=raw,value=stable-gpu
 
       - name: Build and push GPU image
         uses: docker/build-push-action@v6
