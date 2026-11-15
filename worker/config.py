@@ -23,6 +23,8 @@ class Settings:
         if worker_type not in {"cpu", "gpu"}:
             raise ValueError("PARSEC_WORKER_TYPE must be cpu or gpu")
         token = os.getenv("PARSEC_WORKER_TOKEN") or os.getenv("PARSEC_AUDIO_TRANSPORT_TOKEN", "")
+        if worker_type == "gpu":
+            token = ""  # GPU authorization is acquired through one-time Admin pairing.
         if worker_type == "cpu" and not token.strip():
             raise ValueError("CPU workers require PARSEC_WORKER_TOKEN (or PARSEC_AUDIO_TRANSPORT_TOKEN)")
         worker_id = os.getenv("PARSEC_WORKER_ID", socket.gethostname()).strip()
