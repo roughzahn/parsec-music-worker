@@ -38,6 +38,23 @@ class ClapEngine:
         print(f"CLAP model ready on {runtime_device}: {self.model_id}", flush=True)
         return self
 
+    def is_loaded(self) -> bool:
+        return self.model is not None and self.torch is not None
+
+    def unload(self):
+        model = self.model
+        torch = self.torch
+        self.model = None
+        self.torch = None
+        del model
+        if torch is not None and self.device == "gpu":
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        import gc
+        gc.collect()
+
     def analyze(self, audio_path: str) -> dict:
         result = self.analyze_batch([audio_path])[0]
         if isinstance(result, Exception):

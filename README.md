@@ -18,7 +18,11 @@ The Gateway owns inventory synchronization, job creation, scheduling, retry poli
 
 ## Worker health endpoint
 
-The worker exposes `GET /health` on port `8081` inside its container. It returns `503 DOWN` until the CLAP model is loaded and the worker has registered successfully with the Gateway, then returns `200 UP`. It switches back to DOWN during graceful shutdown. The endpoint is used by Docker's container health check and by the Gateway readiness indicator; it is not published to the host or Internet.
+The worker exposes `GET /health` on port `8081` inside its container. It returns `503 DOWN` until the worker has registered successfully and either loaded CLAP or entered an intentional idle/load-protection state with CLAP unloaded, then returns `200 UP`. During an intentional idle or pause state the model may be unloaded while the worker remains healthy and registered. It switches back to DOWN during graceful shutdown. The endpoint is used by Docker's container health check and by the Gateway readiness indicator; it is not published to the host or Internet.
+## Host load protection
+
+The CPU worker understands the Gateway's `202 LOAD_ALLOWED` model-load handshake and `429` / `Retry-After` pause response. When host load protection is active (or host metrics are unavailable), it unloads the CLAP model to release its large resident memory footprint, keeps its registration heartbeat and health endpoint alive, and waits before polling again. It starts registered but unloaded, reloads CLAP only when a queued job is available and the Gateway grants `LOAD_ALLOWED`, and unloads it again after 60 seconds without queued work (`PARSEC_CPU_IDLE_UNLOAD_SECONDS`). This avoids holding the model in RAM while the queue is empty or during a long pause. Active jobs are never interrupted by a new pause signal.
+
 ## Runtime profiles
 
 Both profiles use the same Python application and analysis implementation. Only the container base image and PyTorch runtime differ.

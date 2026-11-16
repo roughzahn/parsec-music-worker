@@ -18,6 +18,7 @@ class Settings:
     health_port: int = 8081
     prefetch_batch_size: int = 1
     inference_batch_size: int = 1
+    idle_unload_seconds: float = 60.0
 
     @classmethod
     def from_env(cls):
@@ -67,4 +68,5 @@ class Settings:
             health_port=int(os.getenv("PARSEC_WORKER_HEALTH_PORT", "8081")),
             prefetch_batch_size=prefetch_batch_size,
             inference_batch_size=inference_batch_size,
+            idle_unload_seconds=max(1.0, float(os.getenv("PARSEC_CPU_IDLE_UNLOAD_SECONDS", "60"))),
         )
