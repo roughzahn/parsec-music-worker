@@ -6,12 +6,12 @@ on:
       bump:
         description: "Which part of the latest semantic version should be incremented?"
         required: true
+        default: patch
         type: choice
         options:
           - patch
           - minor
           - major
-
 permissions:
   contents: write
   packages: write
