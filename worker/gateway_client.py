@@ -6,9 +6,10 @@ import requests
 
 
 class GatewayError(RuntimeError):
-    def __init__(self, status_code: int, message: str):
+    def __init__(self, status_code: int, message: str, retry_after_seconds: int = 0):
         super().__init__(message)
         self.status_code = status_code
+        self.retry_after_seconds = max(0, int(retry_after_seconds or 0))
 
 
 class GatewayClient:
@@ -32,8 +33,14 @@ class GatewayClient:
     def _json(self, method: str, path: str, **kwargs):
         response = self.session.request(method, self._url(path), timeout=self.timeout, **kwargs)
         if response.status_code >= 400:
+            retry_after = response.headers.get("Retry-After", "0")
+            try:
+                retry_after_seconds = int(retry_after)
+            except ValueError:
+                retry_after_seconds = 0
             raise GatewayError(response.status_code,
-                               f"Gateway returned HTTP {response.status_code}: {response.text[:500]}")
+                               f"Gateway returned HTTP {response.status_code}: {response.text[:500]}",
+                               retry_after_seconds)
         if response.status_code == 204 or not response.content:
             return None
         return response.json()

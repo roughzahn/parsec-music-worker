@@ -16,9 +16,11 @@ class Worker:
         self.worker_status = "STARTING"
         self.registration_heartbeat_stop = threading.Event()
         self.last_gateway_contact = None
+        self.load_paused = False
+        self.idle_since = None
 
     def is_ready(self):
-        if not self.ready.is_set() or self.stopping.is_set() or self.last_gateway_contact is None:
+        if not (self.ready.is_set() or self.load_paused) or self.stopping.is_set() or self.last_gateway_contact is None:
             return False
         stale_after = max(60.0, self.settings.heartbeat_seconds * 3, self.settings.poll_seconds * 5)
         return time.monotonic() - self.last_gateway_contact < stale_after
@@ -50,20 +52,26 @@ class Worker:
                 name=f"worker-status-{self.settings.worker_id}", daemon=True)
             status_thread.start()
 
-            print("Loading CLAP model and initializing runtime", flush=True)
-            self.engine.load()
-            if self.stopping.is_set():
-                return
-            with self.worker_status_lock:
-                self.worker_status = "READY"
-                try:
+            if self.settings.worker_type == "cpu":
+                # Register and stay healthy without loading CLAP. The Gateway grants
+                # LOAD_ALLOWED only when a queued job exists and host RAM has headroom.
+                self.load_paused = True
+                with self.worker_status_lock:
+                    self.worker_status = "IDLE"
+                    self.client.update_worker_status(self.settings.worker_id, "IDLE")
+                    self._mark_gateway_contact()
+                print("CPU worker is IDLE; CLAP stays unloaded until a job is available", flush=True)
+            else:
+                print("Loading CLAP model and initializing runtime", flush=True)
+                self.engine.load()
+                if self.stopping.is_set():
+                    return
+                with self.worker_status_lock:
+                    self.worker_status = "READY"
                     self.client.update_worker_status(self.settings.worker_id, "READY")
                     self._mark_gateway_contact()
-                except Exception:
-                    self.worker_status = "STARTING"
-                    raise
-            self.ready.set()
-            print("Worker is READY; polling for analysis jobs", flush=True)
+                self.ready.set()
+                print("Worker is READY; polling for analysis jobs", flush=True)
             if self.settings.worker_type == "gpu":
                 print(
                     f"GPU batching enabled: prefetch={self.settings.prefetch_batch_size}, "
@@ -81,11 +89,21 @@ class Worker:
                     else:
                         job = self.client.claim_job(self.settings.worker_id)
                         self._mark_gateway_contact()
+                        if job and job.get("status") == "LOAD_ALLOWED":
+                            self.idle_since = None
+                            self._ensure_engine_loaded()
+                            continue
                         if not job:
+                            self._unload_after_idle()
                             self.stopping.wait(self.settings.poll_seconds)
                             continue
+                        self.idle_since = None
+                        self._ensure_engine_loaded()
                         self._process(job)
                 except GatewayError as exc:
+                    if self.settings.worker_type == "cpu" and exc.status_code == 429:
+                        self._pause_and_unload(exc)
+                        continue
                     print(f"Gateway communication error: {exc}", flush=True)
                     if self.settings.worker_type == "gpu" and exc.status_code in (401, 403):
                         print("GPU worker session is no longer valid; stopping. Restart and approve the new pairing request.", flush=True)
@@ -106,6 +124,71 @@ class Worker:
                     print(f"Worker {self.settings.worker_id} unregistered", flush=True)
                 except Exception as exc:
                     print(f"Could not unregister worker {self.settings.worker_id}: {exc}", flush=True)
+
+    def _unload_after_idle(self):
+        if self.settings.worker_type != "cpu":
+            return
+        checker = getattr(self.engine, "is_loaded", None)
+        loaded = checker() if callable(checker) else getattr(self.engine, "loaded", True)
+        if not loaded:
+            self.idle_since = None
+            return
+        now = time.monotonic()
+        if self.idle_since is None:
+            self.idle_since = now
+            return
+        if now - self.idle_since < self.settings.idle_unload_seconds:
+            return
+        if hasattr(self.engine, "unload"):
+            self.engine.unload()
+        self.load_paused = True
+        self.ready.clear()
+        self.idle_since = None
+        with self.worker_status_lock:
+            self.worker_status = "IDLE"
+            try:
+                self.client.update_worker_status(self.settings.worker_id, "IDLE")
+                self._mark_gateway_contact()
+            except Exception:
+                # Never continue polling as READY after unloading the model.
+                self.stop()
+                raise
+        print("CPU worker idle timeout reached; CLAP unloaded and worker returned to IDLE", flush=True)
+
+    def _pause_and_unload(self, error):
+        self.load_paused = True
+        self._mark_gateway_contact()
+        checker = getattr(self.engine, "is_loaded", None)
+        loaded = checker() if callable(checker) else getattr(self.engine, "loaded", True)
+        if loaded and hasattr(self.engine, "unload"):
+            self.engine.unload()
+        with self.worker_status_lock:
+            self.worker_status = "PAUSED"
+            try:
+                self.client.update_worker_status(self.settings.worker_id, "PAUSED")
+                self._mark_gateway_contact()
+            except Exception as exc:
+                print(f"Could not report PAUSED worker status: {exc}", flush=True)
+        delay = error.retry_after_seconds or 30
+        action = "unloaded" if loaded else "remains unloaded"
+        print(f"Host load protection paused CPU worker; CLAP {action}, retry in {delay}s", flush=True)
+        self.stopping.wait(max(1, delay))
+
+    def _ensure_engine_loaded(self):
+        checker = getattr(self.engine, "is_loaded", None)
+        loaded = checker() if callable(checker) else getattr(self.engine, "loaded", True)
+        if loaded:
+            return
+        # Keep health/readiness UP while an intentionally unloaded worker loads CLAP.
+        self.ready.clear()
+        print("CPU job available; loading CLAP model", flush=True)
+        self.engine.load()
+        self.load_paused = False
+        with self.worker_status_lock:
+            self.worker_status = "READY"
+            self.client.update_worker_status(self.settings.worker_id, "READY")
+            self._mark_gateway_contact()
+        self.ready.set()
 
     def _claim_batch(self):
         jobs = []
