@@ -7,7 +7,7 @@ Distributed CPU/GPU worker for generating 512-dimensional LAION-CLAP audio embed
 The worker is intentionally a pull-only execution agent:
 
 - Registers its identity, runtime type and capabilities with the Gateway.
-- CPU claims one analysis job at a time; GPU prefetches a configurable queue of jobs from the Gateway.
+- CPU reserves up to 10 jobs per work cycle; GPU prefetches a configurable queue of jobs from the Gateway.
 - Renews every reserved job lease while downloads and batched inference are running.
 - Downloads the requested audio through the Gateway's existing private reverse-audio endpoint.
 - Generates a 512-dimensional LAION-CLAP embedding.
@@ -18,10 +18,20 @@ The Gateway owns inventory synchronization, job creation, scheduling, retry poli
 
 ## Worker health endpoint
 
-The worker exposes `GET /health` on port `8081` inside its container. It returns `503 DOWN` until the worker has registered successfully and either loaded CLAP or entered an intentional idle/load-protection state with CLAP unloaded, then returns `200 UP`. During an intentional idle or pause state the model may be unloaded while the worker remains healthy and registered. It switches back to DOWN during graceful shutdown. The endpoint is used by Docker's container health check and by the Gateway readiness indicator; it is not published to the host or Internet.
-## Host load protection
+The CPU worker reports 200 UP after registration while CLAP is intentionally unloaded between batches and during the fixed cooldown. The GPU worker reports UP after model initialization. Both workers return 503 during startup, graceful shutdown, or when Gateway contact becomes stale. Docker uses this endpoint for the worker container health check and the Gateway readiness indicator; it is not published to the host or Internet.
 
-The CPU worker understands the Gateway's `202 LOAD_ALLOWED` model-load handshake and `429` / `Retry-After` pause response. When host load protection is active (or host metrics are unavailable), it unloads the CLAP model to release its large resident memory footprint, keeps its registration heartbeat and health endpoint alive, and waits before polling again. It starts registered but unloaded, reloads CLAP only when a queued job is available and the Gateway grants `LOAD_ALLOWED`, and unloads it again after 60 seconds without queued work (`PARSEC_CPU_IDLE_UNLOAD_SECONDS`). This avoids holding the model in RAM while the queue is empty or during a long pause. Active jobs are never interrupted by a new pause signal.
+## CPU batch cycle
+
+The CPU worker uses a deterministic work/rest cycle instead of host-resource monitoring:
+
+1. Reserve up to PARSEC_CPU_BATCH_SIZE jobs (default 10) through individual atomic Gateway claims.
+2. Start lease heartbeats for every reserved job.
+3. Load CLAP once and process the reserved jobs sequentially. CPU inference batch size remains 1 to limit transient RAM use.
+4. Complete or fail each job independently.
+5. Unload CLAP, publish PAUSED, and wait PARSEC_CPU_COOLDOWN_SECONDS (default 300 seconds).
+6. Publish READY and begin the next cycle.
+
+The worker stays registered and its health endpoint remains UP while CLAP is unloaded and during the intentional cooldown. No host metrics, LOAD_ALLOWED handshake, or resource-dependent pause response is used. The GPU profile and its batching behavior are unchanged.
 
 ## Runtime profiles
 

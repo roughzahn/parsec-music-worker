@@ -18,7 +18,7 @@ class Settings:
     health_port: int = 8081
     prefetch_batch_size: int = 1
     inference_batch_size: int = 1
-    idle_unload_seconds: float = 60.0
+    cooldown_seconds: float = 300.0
 
     @classmethod
     def from_env(cls):
@@ -43,14 +43,16 @@ class Settings:
                 raise ValueError("PARSEC_GPU_INFERENCE_BATCH_SIZE must be between 1 and the prefetch batch size")
             concurrency_default = prefetch_batch_size
         else:
-            # GPU tuning variables must not alter or constrain CPU worker behavior.
-            prefetch_batch_size = 1
+            prefetch_batch_size = int(os.getenv("PARSEC_CPU_BATCH_SIZE", "10"))
+            if not 1 <= prefetch_batch_size <= 50:
+                raise ValueError("PARSEC_CPU_BATCH_SIZE must be between 1 and 50")
+            # CPU inference remains one file at a time to limit transient RAM usage.
             inference_batch_size = 1
-            concurrency_default = 1
+            concurrency_default = prefetch_batch_size
 
         max_concurrent_jobs = int(os.getenv("PARSEC_WORKER_MAX_CONCURRENT_JOBS", str(concurrency_default)))
-        if worker_type == "cpu" and max_concurrent_jobs != 1:
-            raise ValueError("CPU workers execute one job at a time; max concurrent jobs must be 1")
+        if worker_type == "cpu" and max_concurrent_jobs != prefetch_batch_size:
+            raise ValueError("CPU max concurrent jobs must equal the CPU batch size")
         if worker_type == "gpu" and max_concurrent_jobs != prefetch_batch_size:
             raise ValueError("GPU max concurrent jobs must equal the prefetch batch size")
 
@@ -68,5 +70,5 @@ class Settings:
             health_port=int(os.getenv("PARSEC_WORKER_HEALTH_PORT", "8081")),
             prefetch_batch_size=prefetch_batch_size,
             inference_batch_size=inference_batch_size,
-            idle_unload_seconds=max(1.0, float(os.getenv("PARSEC_CPU_IDLE_UNLOAD_SECONDS", "60"))),
+            cooldown_seconds=max(0.0, float(os.getenv("PARSEC_CPU_COOLDOWN_SECONDS", "300"))) if worker_type == "cpu" else 0.0,
         )

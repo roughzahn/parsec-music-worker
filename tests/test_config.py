@@ -21,16 +21,17 @@ def test_gpu_settings_default_to_twenty_prefetched_and_four_inference_jobs(monke
     assert settings.heartbeat_seconds == 10
 
 
-def test_cpu_profile_remains_single_job(monkeypatch):
+def test_cpu_profile_defaults_to_ten_job_batches_and_five_minute_cooldown(monkeypatch):
     monkeypatch.setenv("PARSEC_WORKER_TOKEN", "secret")
     monkeypatch.setenv("PARSEC_WORKER_TYPE", "cpu")
     monkeypatch.delenv("PARSEC_GPU_PREFETCH_BATCH_SIZE", raising=False)
     monkeypatch.delenv("PARSEC_GPU_INFERENCE_BATCH_SIZE", raising=False)
     settings = Settings.from_env()
     assert settings.worker_type == "cpu"
-    assert settings.prefetch_batch_size == 1
+    assert settings.prefetch_batch_size == 10
     assert settings.inference_batch_size == 1
-    assert settings.max_concurrent_jobs == 1
+    assert settings.max_concurrent_jobs == 10
+    assert settings.cooldown_seconds == 300
 
 
 def test_rejects_gpu_concurrency_not_matching_prefetch(monkeypatch):
@@ -70,6 +71,27 @@ def test_cpu_profile_ignores_gpu_batch_tuning(monkeypatch):
 
     settings = Settings.from_env()
 
-    assert settings.prefetch_batch_size == 1
+    assert settings.prefetch_batch_size == 10
     assert settings.inference_batch_size == 1
-    assert settings.max_concurrent_jobs == 1
+    assert settings.max_concurrent_jobs == 10
+    assert settings.cooldown_seconds == 300
+
+def test_cpu_batch_and_cooldown_can_be_configured(monkeypatch):
+    monkeypatch.setenv("PARSEC_WORKER_TYPE", "cpu")
+    monkeypatch.setenv("PARSEC_WORKER_TOKEN", "secret")
+    monkeypatch.setenv("PARSEC_CPU_BATCH_SIZE", "7")
+    monkeypatch.setenv("PARSEC_CPU_COOLDOWN_SECONDS", "120")
+    settings = Settings.from_env()
+    assert settings.prefetch_batch_size == 7
+    assert settings.max_concurrent_jobs == 7
+    assert settings.inference_batch_size == 1
+    assert settings.cooldown_seconds == 120
+
+
+def test_rejects_cpu_capacity_that_differs_from_batch_size(monkeypatch):
+    monkeypatch.setenv("PARSEC_WORKER_TYPE", "cpu")
+    monkeypatch.setenv("PARSEC_WORKER_TOKEN", "secret")
+    monkeypatch.setenv("PARSEC_CPU_BATCH_SIZE", "10")
+    monkeypatch.setenv("PARSEC_WORKER_MAX_CONCURRENT_JOBS", "1")
+    with pytest.raises(ValueError, match="equal the CPU batch size"):
+        Settings.from_env()

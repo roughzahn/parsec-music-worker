@@ -54,6 +54,13 @@ class ClapEngine:
                 pass
         import gc
         gc.collect()
+        if self.device == "cpu":
+            # Best-effort release of freed PyTorch/native allocations back to the OS.
+            try:
+                import ctypes
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except (AttributeError, OSError):
+                pass
 
     def analyze(self, audio_path: str) -> dict:
         result = self.analyze_batch([audio_path])[0]
