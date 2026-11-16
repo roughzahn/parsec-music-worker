@@ -98,8 +98,6 @@ def run_worker_integration(fail=False):
             elif self.path == "/internal/v1/analysis/workers/cpu-integration/jobs/claim":
                 state["claim_count"] += 1
                 if state["claim_count"] == 1:
-                    self.send_empty()  # Startup permission check while the worker is STARTING.
-                elif state["claim_count"] == 2:
                     self.send_json(200, job)
                 else:
                     self.send_empty()
@@ -146,7 +144,10 @@ def run_worker_integration(fail=False):
         request_timeout=2,
         model_path="/unused/in/test",
         model_id="clap-test-model",
-        max_concurrent_jobs=1,
+        max_concurrent_jobs=10,
+        prefetch_batch_size=10,
+        inference_batch_size=1,
+        cooldown_seconds=0,
     )
     engine = FakeEngine(fail=fail)
     worker = Worker(settings, GatewayClient(settings.gateway_url, settings.token, settings.request_timeout), engine)
@@ -168,7 +169,7 @@ def run_worker_integration(fail=False):
 def test_worker_downloads_audio_analyzes_and_completes_job_over_http():
     state, engine = run_worker_integration()
 
-    assert engine.loaded is True
+    assert engine.loaded is False
     assert engine.analyzed_bytes == AUDIO_BYTES
     assert state["registered"]["workerId"] == "cpu-integration"
     assert state["registered"]["workerType"] == "CPU"
@@ -323,144 +324,106 @@ def test_worker_stopped_during_model_load_never_transitions_to_ready():
     assert state["unregistered"] is True
 
 
-def test_cpu_worker_unloads_clap_during_host_pause_and_reloads_before_next_job():
+
+def test_cpu_worker_processes_a_reserved_batch_with_one_model_load_then_unloads():
     finished = threading.Event()
-    state = {"claims": 0, "loads": 0, "unloads": 0, "completed": False}
-    job = {
-        "jobId": "job-after-pause",
-        "leaseToken": "lease-after-pause",
-        "audio": {"path": "Artist/Album/after-pause.wav", "sizeBytes": len(AUDIO_BYTES)},
-    }
+    paused = threading.Event()
+    state = {"claims": 0, "loads": 0, "unloads": 0, "completed": [], "statuses": []}
+    jobs = [
+        {
+            "jobId": "cpu-batch-job-" + str(index),
+            "leaseToken": "lease-" + str(index),
+            "audio": {"path": "Artist/Album/" + str(index) + ".wav", "sizeBytes": len(AUDIO_BYTES)},
+        }
+        for index in range(3)
+    ]
 
-    class RecordingClient:
-        def register(self, *args, **kwargs):
-            return True
-
-        def update_worker_status(self, worker_id, status):
-            pass
-
-        def claim_job(self, worker_id):
-            state["claims"] += 1
-            if state["claims"] in (1, 3):
-                raise GatewayError(429, "host load protection", 1)
-            if state["claims"] in (2, 4):
-                return {"status": "LOAD_ALLOWED"}
-            if state["claims"] == 5:
-                return job
-            return None
-
-        def download_audio(self, audio_path, expected_size, destination):
-            with open(destination, "wb") as target:
-                target.write(AUDIO_BYTES)
-
-        def complete_job(self, worker_id, job_id, lease_token, result):
-            state["completed"] = True
-            finished.set()
-
-        def fail_job(self, *args, **kwargs):
-            raise AssertionError("job should not fail")
-
-        def unregister(self, worker_id):
-            pass
-
-    class CountingEngine(FakeEngine):
-        def load(self):
-            super().load()
-            state["loads"] += 1
-
-        def unload(self):
-            super().unload()
-            state["unloads"] += 1
-
-    settings = Settings(
-        gateway_url="http://unused", token="test", worker_id="cpu-pause-test",
-        worker_type="cpu", poll_seconds=0.01, heartbeat_seconds=10,
-        request_timeout=2, model_path="/unused/model", model_id="clap-test-model",
-        max_concurrent_jobs=1,
-    )
-    engine = CountingEngine()
-    worker = Worker(settings, RecordingClient(), engine)
-    thread = Thread(target=worker.run, daemon=True)
-    thread.start()
-
-    try:
-        assert finished.wait(timeout=6), "worker did not resume and complete the job"
-    finally:
-        worker.stop()
-        thread.join(timeout=2)
-
-    assert not thread.is_alive()
-    assert state["claims"] >= 5
-    assert state["loads"] == 2
-    assert state["unloads"] == 1
-    assert state["completed"] is True
-
-
-def test_cpu_worker_starts_unloaded_and_unloads_after_idle_timeout():
-    finished = threading.Event()
-    state = {"claims": 0, "loads": 0, "unloads": 0, "statuses": []}
-    job = {
-        "jobId": "job-after-idle",
-        "leaseToken": "lease-after-idle",
-        "audio": {"path": "Artist/Album/after-idle.wav", "sizeBytes": len(AUDIO_BYTES)},
-    }
-
-    class IdleClient:
-        def register(self, *args, **kwargs):
+    class BatchClient:
+        def register(self, worker_id, worker_type, model_id, capacity, worker_status, stop_event=None):
+            state["capacity"] = capacity
             return True
 
         def update_worker_status(self, worker_id, status):
             state["statuses"].append(status)
+            if status == "PAUSED":
+                paused.set()
 
         def claim_job(self, worker_id):
             state["claims"] += 1
-            if state["claims"] in (3, 7):
-                return {"status": "LOAD_ALLOWED"}
-            if state["claims"] == 8:
-                return job
+            if state["claims"] <= len(jobs):
+                return jobs[state["claims"] - 1]
             return None
+
+        def heartbeat(self, worker_id, job_id, lease_token):
+            return {"leaseValid": True}
 
         def download_audio(self, audio_path, expected_size, destination):
             with open(destination, "wb") as target:
                 target.write(AUDIO_BYTES)
 
         def complete_job(self, worker_id, job_id, lease_token, result):
-            finished.set()
+            state["completed"].append(job_id)
+            if len(state["completed"]) == len(jobs):
+                finished.set()
 
         def fail_job(self, *args, **kwargs):
-            raise AssertionError("job should not fail")
+            raise AssertionError("batch jobs should complete successfully")
 
         def unregister(self, worker_id):
             pass
 
-    class CountingEngine(FakeEngine):
+    class CountingEngine:
+        def __init__(self):
+            self.loaded = False
+
         def load(self):
-            super().load()
+            assert not self.loaded
+            self.loaded = True
             state["loads"] += 1
 
+        def analyze_batch(self, audio_paths):
+            assert self.loaded
+            return [
+                {
+                    "modelId": "clap-test-model",
+                    "embeddingVersion": 1,
+                    "dimensions": 512,
+                    "embedding": [0.125] * 512,
+                    "processingSeconds": 0.01,
+                    "runtime": "cpu",
+                }
+                for _ in audio_paths
+            ]
+
         def unload(self):
-            super().unload()
+            self.loaded = False
             state["unloads"] += 1
 
     settings = Settings(
-        gateway_url="http://unused", token="test", worker_id="cpu-idle-test",
+        gateway_url="http://unused", token="test", worker_id="cpu-batch-test",
         worker_type="cpu", poll_seconds=0.01, heartbeat_seconds=10,
         request_timeout=2, model_path="/unused/model", model_id="clap-test-model",
-        max_concurrent_jobs=1, idle_unload_seconds=0.02,
+        max_concurrent_jobs=3, prefetch_batch_size=3, inference_batch_size=1,
+        cooldown_seconds=0,
     )
     engine = CountingEngine()
-    worker = Worker(settings, IdleClient(), engine)
+    worker = Worker(settings, BatchClient(), engine)
     thread = Thread(target=worker.run, daemon=True)
     thread.start()
 
     try:
-        assert finished.wait(timeout=6), "worker did not return to IDLE and process the next job"
+        assert finished.wait(timeout=5), "CPU worker did not complete its reserved batch"
+        assert paused.wait(timeout=1), "CPU worker did not publish its cooldown state"
     finally:
         worker.stop()
         thread.join(timeout=2)
 
     assert not thread.is_alive()
-    assert state["loads"] == 2
+    assert state["capacity"] == 3
+    assert state["claims"] in (3, 4)
+    assert len(state["completed"]) == 3
+    assert state["loads"] == 1
     assert state["unloads"] == 1
-    assert state["statuses"].count("IDLE") >= 2
-    assert state["statuses"][-1] == "READY"
+    assert engine.loaded is False
+    assert "PAUSED" in state["statuses"]
+    assert state["statuses"][-1] in ("READY", "PAUSED")
