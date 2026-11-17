@@ -8,7 +8,7 @@ from worker.health import WorkerHealthServer
 
 def test_health_endpoint_reflects_model_and_registration_readiness():
     state = {"ready": False}
-    server = WorkerHealthServer(("127.0.0.1", 0), lambda: state["ready"])
+    server = WorkerHealthServer(("127.0.0.1", 0), lambda: state["ready"], "1.2.3")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
@@ -19,12 +19,12 @@ def test_health_endpoint_reflects_model_and_registration_readiness():
             assert False, "health endpoint must be unavailable before readiness"
         except HTTPError as error:
             assert error.code == 503
-            assert json.loads(error.read()) == {"status": "DOWN", "ready": False}
+            assert json.loads(error.read()) == {"status": "DOWN", "ready": False, "softwareVersion": "1.2.3"}
 
         state["ready"] = True
         with urlopen(url, timeout=2) as response:
             assert response.status == 200
-            assert json.loads(response.read()) == {"status": "UP", "ready": True}
+            assert json.loads(response.read()) == {"status": "UP", "ready": True, "softwareVersion": "1.2.3"}
     finally:
         server.shutdown()
         server.server_close()

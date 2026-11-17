@@ -5,8 +5,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class WorkerHealthServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, is_ready):
+    def __init__(self, address, is_ready, software_version="dev"):
         self.is_ready = is_ready
+        self.software_version = software_version
         super().__init__(address, self._handler())
 
     def _handler(self):
@@ -18,7 +19,8 @@ class WorkerHealthServer(ThreadingHTTPServer):
                     self.send_error(404)
                     return
                 ready = server.is_ready()
-                payload = json.dumps({"status": "UP" if ready else "DOWN", "ready": ready}).encode()
+                payload = json.dumps({"status": "UP" if ready else "DOWN", "ready": ready,
+                                      "softwareVersion": server.software_version}).encode()
                 self.send_response(200 if ready else 503)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))

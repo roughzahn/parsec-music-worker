@@ -46,10 +46,10 @@ class GatewayClient:
         return response.json()
 
     def register(self, worker_id: str, worker_type: str, model_id: str, max_concurrent_jobs: int,
-                 worker_status: str = "READY", stop_event=None):
+                 worker_status: str = "READY", stop_event=None, worker_version: str = "dev"):
         self.worker_id = worker_id
         if worker_type.upper() == "GPU":
-            return self._register_gpu(worker_id, model_id, max_concurrent_jobs, stop_event)
+            return self._register_gpu(worker_id, model_id, max_concurrent_jobs, stop_event, worker_version)
         result = self._json("POST", "/internal/v1/analysis/workers/register", json={
             "workerId": worker_id,
             "workerType": worker_type.upper(),
@@ -57,14 +57,15 @@ class GatewayClient:
             "modelId": model_id,
             "maxConcurrentJobs": max_concurrent_jobs,
             "workerStatus": worker_status.upper(),
+            "workerVersion": worker_version,
         })
         return True
 
-    def _register_gpu(self, worker_id: str, model_id: str, max_concurrent_jobs: int, stop_event=None):
+    def _register_gpu(self, worker_id: str, model_id: str, max_concurrent_jobs: int, stop_event=None, worker_version: str = "dev"):
         registration = self._json("POST", "/internal/v1/analysis/gpu-pairing/register", json={
             "workerId": worker_id,
             "hostname": socket.gethostname(),
-            "workerVersion": "0.2",
+            "workerVersion": worker_version,
             "modelId": model_id,
             "capabilities": ["audio-embedding", "clap-embedding-512", "cuda"],
             "maxConcurrentJobs": max_concurrent_jobs,
