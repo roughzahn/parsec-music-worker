@@ -13,25 +13,30 @@ class ClapEngine:
         self.model_id = model_id
         self.model = None
         self.torch = None
+        self._cpu_threads_configured = False
 
     def load(self):
         import torch
-        import laion_clap
 
         if not os.path.isfile(self.model_path):
             raise FileNotFoundError(f"CLAP checkpoint not found: {self.model_path}")
         if self.device == "gpu" and not torch.cuda.is_available():
             raise RuntimeError("GPU worker requested but CUDA is not available")
         runtime_device = "cuda" if self.device == "gpu" else "cpu"
-        if runtime_device == "cpu":
+        if runtime_device == "cpu" and not self._cpu_threads_configured:
             torch_threads = max(1, int(os.getenv("PARSEC_TORCH_NUM_THREADS", "2")))
             torch_interop_threads = max(1, int(os.getenv("PARSEC_TORCH_INTEROP_THREADS", "1")))
+            # Configure PyTorch before importing CLAP: its import may start parallel
+            # work, after which PyTorch no longer allows inter-op thread changes.
             torch.set_num_threads(torch_threads)
             torch.set_num_interop_threads(torch_interop_threads)
+            self._cpu_threads_configured = True
             print(
                 f"PyTorch CPU threads: intra-op={torch_threads}, inter-op={torch_interop_threads}",
                 flush=True,
             )
+        import laion_clap
+
         self.torch = torch
         self.model = laion_clap.CLAP_Module(enable_fusion=False, device=runtime_device)
         self.model.load_ckpt(ckpt=self.model_path, verbose=False)

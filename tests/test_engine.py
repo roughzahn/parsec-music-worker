@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import builtins
 
 import numpy as np
 
@@ -95,3 +96,55 @@ def test_batch_inference_falls_back_to_single_files_after_batch_error(monkeypatc
     assert len(results) == 3
     assert all(result["dimensions"] == 512 for result in results)
     assert engine.model.batch_sizes == [3, 1, 1, 1]
+
+
+def test_cpu_thread_configuration_runs_once_before_clap_import(monkeypatch, tmp_path):
+    calls = []
+
+    class ConfigurableTorch(FakeTorch):
+        cuda = SimpleNamespace(is_available=lambda: False)
+
+        def set_num_threads(self, value):
+            calls.append(("intra", value))
+
+        def set_num_interop_threads(self, value):
+            calls.append(("interop", value))
+
+    fake_torch = ConfigurableTorch()
+
+    class LoadedModel:
+        def load_ckpt(self, ckpt, verbose):
+            calls.append(("load_ckpt", ckpt, verbose))
+
+    class ClapModule:
+        def __init__(self, enable_fusion, device):
+            calls.append(("clap_import", enable_fusion, device))
+            self.model = LoadedModel()
+
+        def load_ckpt(self, ckpt, verbose):
+            self.model.load_ckpt(ckpt, verbose)
+
+    fake_clap = SimpleNamespace(CLAP_Module=ClapModule)
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "torch":
+            return fake_torch
+        if name == "laion_clap":
+            calls.append(("laion_import",))
+            return fake_clap
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    model_path = tmp_path / "clap.pt"
+    model_path.write_bytes(b"checkpoint")
+    engine = engine_module.ClapEngine("cpu", str(model_path), "test-model")
+
+    engine.load()
+    engine.unload()
+    engine.load()
+
+    assert calls.count(("intra", 2)) == 1
+    assert calls.count(("interop", 1)) == 1
+    assert calls.index(("interop", 1)) < calls.index(("laion_import",))
+    assert engine.is_loaded()
