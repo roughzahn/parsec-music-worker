@@ -23,7 +23,7 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    health_server = WorkerHealthServer(("0.0.0.0", settings.health_port), worker.is_ready)
+    health_server = WorkerHealthServer(("0.0.0.0", settings.health_port), worker.is_ready, settings.software_version)
     health_thread = threading.Thread(target=health_server.serve_forever, name="health-server", daemon=True)
     health_thread.start()
     try:
