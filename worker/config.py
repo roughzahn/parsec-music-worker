@@ -15,6 +15,7 @@ class Settings:
     model_path: str
     model_id: str
     max_concurrent_jobs: int
+    software_version: str = "dev"
     health_port: int = 8081
     prefetch_batch_size: int = 1
     inference_batch_size: int = 1
@@ -67,6 +68,7 @@ class Settings:
             model_path=os.getenv("PARSEC_CLAP_MODEL_PATH", "/models/630k-audioset-best.pt"),
             model_id=os.getenv("PARSEC_CLAP_MODEL_ID", "laion-clap-630k-audioset-v1"),
             max_concurrent_jobs=max_concurrent_jobs,
+            software_version=os.getenv("PARSEC_SOFTWARE_VERSION", "dev").strip() or "dev",
             health_port=int(os.getenv("PARSEC_WORKER_HEALTH_PORT", "8081")),
             prefetch_batch_size=prefetch_batch_size,
             inference_batch_size=inference_batch_size,
