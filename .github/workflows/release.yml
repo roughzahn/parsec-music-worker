@@ -114,6 +114,8 @@ jobs:
         with:
           context: .
           file: Dockerfile.cpu
+          build-args: |
+            PARSEC_SOFTWARE_VERSION=${{ steps.version.outputs.version }}
           push: true
           tags: ${{ steps.cpu-meta.outputs.tags }}
           labels: ${{ steps.cpu-meta.outputs.labels }}
@@ -135,6 +137,8 @@ jobs:
         with:
           context: .
           file: Dockerfile.gpu
+          build-args: |
+            PARSEC_SOFTWARE_VERSION=${{ steps.version.outputs.version }}
           push: true
           tags: ${{ steps.gpu-meta.outputs.tags }}
           labels: ${{ steps.gpu-meta.outputs.labels }}
