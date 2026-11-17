@@ -275,7 +275,7 @@ def test_worker_stopped_during_model_load_never_transitions_to_ready():
     state = {"statuses": [], "unregistered": False}
 
     class RecordingClient:
-        def register(self, worker_id, worker_type, model_id, capacity, worker_status, stop_event=None):
+        def register(self, worker_id, worker_type, model_id, capacity, worker_status, stop_event=None, worker_version="dev"):
             return True
 
         def update_worker_status(self, worker_id, status, **metadata):
@@ -339,7 +339,7 @@ def test_cpu_worker_processes_a_reserved_batch_with_one_model_load_then_unloads(
     ]
 
     class BatchClient:
-        def register(self, worker_id, worker_type, model_id, capacity, worker_status, stop_event=None):
+        def register(self, worker_id, worker_type, model_id, capacity, worker_status, stop_event=None, worker_version="dev"):
             state["capacity"] = capacity
             return True
 
