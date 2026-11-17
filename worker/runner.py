@@ -40,11 +40,12 @@ class Worker:
                 registered = self.client.register(
                     self.settings.worker_id, self.settings.worker_type,
                     self.settings.model_id, self.settings.max_concurrent_jobs,
-                    worker_status="STARTING", stop_event=self.stopping)
+                    worker_status="STARTING", stop_event=self.stopping,
+                    worker_version=self.settings.software_version)
             else:
                 self.client.register(self.settings.worker_id, self.settings.worker_type,
                                      self.settings.model_id, self.settings.max_concurrent_jobs,
-                                     worker_status="STARTING")
+                                     worker_status="STARTING", worker_version=self.settings.software_version)
                 registered = True
             if not registered:
                 return
