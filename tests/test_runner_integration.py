@@ -207,7 +207,7 @@ def test_worker_registers_as_starting_before_model_load_and_claims_only_when_rea
     state = {"registration": None, "statuses": [], "claims": 0, "unregistered": False}
 
     class RecordingClient:
-        def register(self, worker_id, worker_type, model_id, capacity, worker_status, stop_event=None):
+        def register(self, worker_id, worker_type, model_id, capacity, worker_status, stop_event=None, worker_version="dev"):
             state["registration"] = worker_status
             registered.set()
             return True
