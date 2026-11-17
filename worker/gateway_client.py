@@ -90,10 +90,11 @@ class GatewayClient:
                 time.sleep(5)
         return False
 
-    def update_worker_status(self, worker_id: str, status: str):
+    def update_worker_status(self, worker_id: str, status: str, *, pause_started_at=None, cooldown_until=None):
         worker_path = quote(worker_id, safe="")
         return self._json("POST", f"/internal/v1/analysis/workers/{worker_path}/status",
-                          json={"status": status.upper()})
+                          json={"status": status.upper(), "pauseStartedAt": pause_started_at,
+                                "cooldownUntil": cooldown_until})
 
     def session_heartbeat(self, worker_id: str):
         worker_path = quote(worker_id, safe="")

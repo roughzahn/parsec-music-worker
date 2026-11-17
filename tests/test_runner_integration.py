@@ -212,7 +212,7 @@ def test_worker_registers_as_starting_before_model_load_and_claims_only_when_rea
             registered.set()
             return True
 
-        def update_worker_status(self, worker_id, status):
+        def update_worker_status(self, worker_id, status, **metadata):
             state["statuses"].append(status)
             if status == "STARTING":
                 starting_heartbeat.set()
@@ -278,7 +278,7 @@ def test_worker_stopped_during_model_load_never_transitions_to_ready():
         def register(self, worker_id, worker_type, model_id, capacity, worker_status, stop_event=None):
             return True
 
-        def update_worker_status(self, worker_id, status):
+        def update_worker_status(self, worker_id, status, **metadata):
             state["statuses"].append(status)
 
         def session_heartbeat(self, worker_id):
@@ -328,7 +328,7 @@ def test_worker_stopped_during_model_load_never_transitions_to_ready():
 def test_cpu_worker_processes_a_reserved_batch_with_one_model_load_then_unloads():
     finished = threading.Event()
     paused = threading.Event()
-    state = {"claims": 0, "loads": 0, "unloads": 0, "completed": [], "statuses": []}
+    state = {"claims": 0, "loads": 0, "unloads": 0, "completed": [], "statuses": [], "status_updates": []}
     jobs = [
         {
             "jobId": "cpu-batch-job-" + str(index),
@@ -343,8 +343,9 @@ def test_cpu_worker_processes_a_reserved_batch_with_one_model_load_then_unloads(
             state["capacity"] = capacity
             return True
 
-        def update_worker_status(self, worker_id, status):
+        def update_worker_status(self, worker_id, status, **metadata):
             state["statuses"].append(status)
+            state["status_updates"].append({"status": status, **metadata})
             if status == "PAUSED":
                 paused.set()
 

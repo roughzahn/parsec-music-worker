@@ -2,6 +2,7 @@ import os
 import tempfile
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from .gateway_client import GatewayClient, GatewayError
 
 
@@ -14,6 +15,8 @@ class Worker:
         self.ready = threading.Event()
         self.worker_status_lock = threading.Lock()
         self.worker_status = "STARTING"
+        self.pause_started_at = None
+        self.cooldown_until = None
         self.registration_heartbeat_stop = threading.Event()
         self.last_gateway_contact = None
 
@@ -140,7 +143,9 @@ class Worker:
         while not stop_event.wait(self.settings.heartbeat_seconds):
             try:
                 with self.worker_status_lock:
-                    self.client.update_worker_status(self.settings.worker_id, self.worker_status)
+                    self.client.update_worker_status(
+                        self.settings.worker_id, self.worker_status,
+                        pause_started_at=self.pause_started_at, cooldown_until=self.cooldown_until)
                     if self.settings.worker_type == "gpu":
                         self.client.session_heartbeat(self.settings.worker_id)
                     self._mark_gateway_contact()
@@ -246,10 +251,16 @@ class Worker:
 
         if self.stopping.is_set():
             return
+        pause_started = datetime.now(timezone.utc)
+        cooldown_ends = pause_started + timedelta(seconds=self.settings.cooldown_seconds)
+        self.pause_started_at = pause_started.isoformat()
+        self.cooldown_until = cooldown_ends.isoformat()
         with self.worker_status_lock:
             self.worker_status = "PAUSED"
             try:
-                self.client.update_worker_status(self.settings.worker_id, "PAUSED")
+                self.client.update_worker_status(
+                    self.settings.worker_id, "PAUSED",
+                    pause_started_at=self.pause_started_at, cooldown_until=self.cooldown_until)
                 self._mark_gateway_contact()
             except Exception as exc:
                 print(f"Could not publish CPU cooldown status: {exc}", flush=True)
@@ -258,6 +269,8 @@ class Worker:
         if not self.stopping.is_set():
             with self.worker_status_lock:
                 self.worker_status = "READY"
+                self.pause_started_at = None
+                self.cooldown_until = None
                 self.client.update_worker_status(self.settings.worker_id, "READY")
                 self._mark_gateway_contact()
             print("CPU worker cooldown complete; READY for the next batch", flush=True)

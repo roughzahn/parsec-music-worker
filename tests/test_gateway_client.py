@@ -21,7 +21,23 @@ def test_worker_status_route_url_encodes_worker_id():
 
     assert captured["method"] == "POST"
     assert captured["path"] == "/internal/v1/analysis/workers/gpu%20worker%2F1/status"
-    assert captured["kwargs"]["json"] == {"status": "STARTING"}
+    assert captured["kwargs"]["json"] == {"status": "STARTING", "pauseStartedAt": None, "cooldownUntil": None}
+
+
+def test_worker_status_forwards_actual_cooldown_timestamps():
+    client = GatewayClient("http://gateway", "secret")
+    captured = {}
+    client._json = lambda method, path, **kwargs: captured.update(method=method, path=path, kwargs=kwargs)
+
+    client.update_worker_status(
+        "cpu-1", "paused", pause_started_at="2026-11-17T18:00:00+00:00",
+        cooldown_until="2026-11-17T18:05:00+00:00")
+
+    assert captured["kwargs"]["json"] == {
+        "status": "PAUSED",
+        "pauseStartedAt": "2026-11-17T18:00:00+00:00",
+        "cooldownUntil": "2026-11-17T18:05:00+00:00",
+    }
 
 
 def test_gpu_pairing_sets_only_ephemeral_authorization_after_approval(monkeypatch):
