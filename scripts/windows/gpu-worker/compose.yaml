@@ -1,0 +1,25 @@
+services:
+  parsec-music-worker-gpu:
+    image: ghcr.io/roughzahn/parsec-music-worker:stable-gpu
+    container_name: parsec-music-worker-gpu
+    restart: unless-stopped
+    env_file:
+      - C:/parsec/gpu-worker-prod.env
+    environment:
+      TZ: Europe/Berlin
+      PARSEC_WORKER_TYPE: gpu
+      PARSEC_WORKER_HEALTH_PORT: "8081"
+      PARSEC_GPU_PREFETCH_BATCH_SIZE: "20"
+      PARSEC_GPU_INFERENCE_BATCH_SIZE: "4"
+      PARSEC_CLAP_MODEL_PATH: /models/630k-audioset-best.pt
+      HF_HOME: /cache/huggingface
+    volumes:
+      - C:/parsec/models/630k-audioset-best.pt:/models/630k-audioset-best.pt:ro
+      - C:/parsec/models/huggingface:/cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

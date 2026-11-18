@@ -179,3 +179,21 @@ The tests do not download PyTorch or the CLAP model. Full model execution is per
 - Model files, local environment files, generated embeddings and music files must never be committed.
 - The old one-shot scanner and CSV-based index builder are intentionally not part of this distributed worker. Inventory discovery and index updates belong to the Gateway and Search service respectively.
 - Do not deploy this worker against production until Gateway PR #2 is merged and released, and the full Audio Node → Gateway → worker → Search integration test has passed.
+
+## Windows production GPU worker updater
+
+The production GPU worker can be updated independently of the development and E2E Compose profiles. The versioned, double-click updater is located at:
+
+```text
+scripts/windows/gpu-worker/
+```
+
+On the Windows host, check out this repository and double-click `update-gpu-worker.cmd` in that directory. The updater pulls `ghcr.io/roughzahn/parsec-music-worker:stable-gpu` first and only recreates the production container after the pull succeeds. It then reports the container state, worker health, software version and recent logs. It does not publish host ports and does not change the worker's registration or manual approval behavior.
+
+The production configuration and persistent data deliberately remain outside the repository:
+
+- `C:\parsec\gpu-worker-prod.env` — local worker settings; never commit this file.
+- `C:\parsec\models\630k-audioset-best.pt` — model checkpoint, mounted read-only.
+- `C:\parsec\models\huggingface` — persistent Hugging Face cache.
+
+These paths are host data locations, while the updater and Compose file are resolved relative to the checked-out repository. The Windows production updater is separate from `compose.gpu.yaml` (development) and any E2E test configuration. It tracks only the published `stable-gpu` image; it never builds an image from the checked-out source.
