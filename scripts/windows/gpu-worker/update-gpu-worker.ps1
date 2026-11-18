@@ -78,15 +78,9 @@ try {
     Write-Section 'Check worker health and version'
     $health = $null
     $healthDeadline = (Get-Date).AddSeconds(45)
-    $healthProbe = @'
-import urllib.request
-import urllib.error
-try:
-    response = urllib.request.urlopen("http://127.0.0.1:8081/health", timeout=3)
-    print(response.read().decode())
-except urllib.error.HTTPError as error:
-    print(error.read().decode())
-'@
+    # Keep the Python probe on one line so PowerShell passes it to docker as one argument.
+    # requests returns the JSON body for both HTTP 200 (ready) and HTTP 503 (still starting/pending).
+    $healthProbe = "import requests; print(requests.get('http://127.0.0.1:8081/health', timeout=3).text)"
 
     while ((Get-Date) -lt $healthDeadline) {
         $healthOutput = & docker exec $ContainerName python -c $healthProbe 2>$null
@@ -116,8 +110,10 @@ except urllib.error.HTTPError as error:
         }
     }
     else {
-        Write-Host 'Container is running, but /health did not respond within 45 seconds.' -ForegroundColor Yellow
-        Write-Host 'Check the container logs below for the reason.'
+        Write-Host 'Worker health endpoint did not return a valid response within 45 seconds.' -ForegroundColor Red
+        Write-Host 'Recent worker logs:' -ForegroundColor Yellow
+        & docker logs --tail 40 $ContainerName
+        throw 'Worker health check failed. The container may be restarting or the Gateway may have rejected registration.'
     }
 
     Write-Section 'Recent worker logs'
