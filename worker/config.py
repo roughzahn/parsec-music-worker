@@ -63,7 +63,7 @@ class Settings:
             worker_id=worker_id,
             worker_type=worker_type,
             poll_seconds=float(os.getenv("PARSEC_WORKER_POLL_SECONDS", "3")),
-            heartbeat_seconds=float(os.getenv("PARSEC_WORKER_HEARTBEAT_SECONDS", "10" if worker_type == "gpu" else "20")),
+            heartbeat_seconds=float(os.getenv("PARSEC_WORKER_HEARTBEAT_SECONDS", "10" if worker_type == "gpu" else "5")),
             request_timeout=float(os.getenv("PARSEC_WORKER_REQUEST_TIMEOUT", "60")),
             model_path=os.getenv("PARSEC_CLAP_MODEL_PATH", "/models/630k-audioset-best.pt"),
             model_id=os.getenv("PARSEC_CLAP_MODEL_ID", "laion-clap-630k-audioset-v1"),

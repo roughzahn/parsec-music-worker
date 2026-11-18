@@ -22,7 +22,9 @@ The CPU worker reports 200 UP after registration while CLAP is intentionally unl
 
 ## CPU batch cycle
 
-The CPU worker uses a deterministic work/rest cycle instead of host-resource monitoring:
+The CPU worker uses a deterministic work/rest cycle instead of host-resource monitoring. GPU workers have exclusive priority: when any approved GPU worker is online, the Gateway returns HTTP 423 to CPU claim requests and the CPU worker reports `PAUSED_BY_GPU`. The Gateway requeues outstanding CPU leases without incrementing their attempt count; lease heartbeats notify the CPU worker, which stops at the next inference boundary, skips the remaining prefetched jobs and unloads CLAP. If GPU approval arrives during an inference, that result is discarded with the revoked lease and the GPU retries the job. The CPU worker automatically resumes after all GPU workers have gone offline or their sessions have expired.
+
+The normal CPU work/rest cycle is:
 
 1. Reserve up to PARSEC_CPU_BATCH_SIZE jobs (default 10) through individual atomic Gateway claims.
 2. Start lease heartbeats for every reserved job.
