@@ -30,6 +30,16 @@ class Worker:
     def _mark_gateway_contact(self):
         self.last_gateway_contact = time.monotonic()
 
+    def _set_worker_status(self, status):
+        with self.worker_status_lock:
+            if self.worker_status == status:
+                return
+            self.worker_status = status
+            self.pause_started_at = None
+            self.cooldown_until = None
+            self.client.update_worker_status(self.settings.worker_id, status)
+            self._mark_gateway_contact()
+
     def run(self):
         registered = False
         status_stop = self.registration_heartbeat_stop
@@ -94,11 +104,22 @@ class Worker:
                         self._process_batch(jobs)
                     else:
                         jobs = self._claim_batch()
+                        if self.worker_status == "PAUSED_BY_GPU":
+                            self._set_worker_status("READY")
+                            print("GPU worker is no longer active; CPU worker resumed", flush=True)
                         if not jobs:
                             self.stopping.wait(self.settings.poll_seconds)
                             continue
                         self._process_cpu_batch(jobs)
                 except GatewayError as exc:
+                    if self.settings.worker_type == "cpu" and exc.status_code == 423:
+                        try:
+                            self._set_worker_status("PAUSED_BY_GPU")
+                        except Exception as status_error:
+                            print(f"Could not publish GPU pause status: {status_error}", flush=True)
+                        print("CPU worker paused because a GPU worker is active", flush=True)
+                        self.stopping.wait(max(self.settings.poll_seconds, exc.retry_after_seconds))
+                        continue
                     print(f"Gateway communication error: {exc}", flush=True)
                     if self.settings.worker_type == "gpu" and exc.status_code in (401, 403):
                         print("GPU worker session is no longer valid; stopping. Restart and approve the new pairing request.", flush=True)
@@ -128,6 +149,9 @@ class Worker:
             try:
                 job = self.client.claim_job(self.settings.worker_id)
             except GatewayError as exc:
+                if exc.status_code == 423:
+                    # The Gateway has already returned preempted CPU leases to the queue.
+                    raise
                 if jobs:
                     print(f"Gateway interrupted batch reservation after {len(jobs)} jobs; processing the partial batch: {exc}", flush=True)
                     break
@@ -215,10 +239,13 @@ class Worker:
             heartbeats[job_id] = self._start_job_heartbeat(job)
 
         try:
-            print(f"CPU batch reserved: {len(jobs)} jobs; loading CLAP once", flush=True)
-            self.engine.load()
-            if not self.stopping.is_set():
-                self._process_batch(jobs, heartbeats=heartbeats)
+            if any(lease_lost.is_set() for _, lease_lost, _ in heartbeats.values()):
+                print("CPU batch was preempted before model load; skipping CLAP initialization", flush=True)
+            else:
+                print(f"CPU batch reserved: {len(jobs)} jobs; loading CLAP once", flush=True)
+                self.engine.load()
+                if not self.stopping.is_set():
+                    self._process_batch(jobs, heartbeats=heartbeats)
         except Exception as exc:
             print(f"CPU batch failed during model initialization: {type(exc).__name__}: {exc}", flush=True)
             for job in jobs:
@@ -248,9 +275,16 @@ class Worker:
                 # Never start another batch when releasing the model could not be confirmed.
                 print("CPU worker stopping because CLAP could not be safely unloaded", flush=True)
                 self.stop()
-                return
 
         if self.stopping.is_set():
+            return
+        preempted = any(lease_lost.is_set() for _, lease_lost, _ in heartbeats.values())
+        if preempted:
+            try:
+                self._set_worker_status("PAUSED_BY_GPU")
+            except Exception as exc:
+                print(f"Could not publish GPU preemption status: {exc}", flush=True)
+            print("CPU batch preempted by GPU worker; skipping cooldown", flush=True)
             return
         pause_started = datetime.now(timezone.utc)
         cooldown_ends = pause_started + timedelta(seconds=self.settings.cooldown_seconds)
@@ -311,7 +345,15 @@ class Worker:
                     and not heartbeats[str(job["jobId"])][1].is_set()
                 ]
                 for offset in range(0, len(valid_jobs), self.settings.inference_batch_size):
-                    chunk = valid_jobs[offset:offset + self.settings.inference_batch_size]
+                    # A GPU registration revokes all outstanding CPU leases. Re-check
+                    # immediately before every inference chunk so the CPU stops at the
+                    # current file boundary rather than finishing its prefetched batch.
+                    chunk = [
+                        job for job in valid_jobs[offset:offset + self.settings.inference_batch_size]
+                        if not heartbeats[str(job["jobId"])][1].is_set()
+                    ]
+                    if not chunk:
+                        continue
                     try:
                         if hasattr(self.engine, "analyze_batch"):
                             chunk_results = self.engine.analyze_batch(
@@ -352,7 +394,10 @@ class Worker:
                         flush=True,
                     )
                 except Exception as exc:
-                    if isinstance(exc, GatewayError) and exc.status_code in (401, 403):
+                    if isinstance(exc, GatewayError) and exc.status_code in (404, 409, 410):
+                        lease_lost.set()
+                        print(f"Lease was revoked while completing job {job_id}", flush=True)
+                    elif isinstance(exc, GatewayError) and exc.status_code in (401, 403):
                         print("GPU worker authorization expired while processing; stopping for re-approval.", flush=True)
                         self.stop()
                     elif not lease_lost.is_set():

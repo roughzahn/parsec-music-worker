@@ -428,3 +428,145 @@ def test_cpu_worker_processes_a_reserved_batch_with_one_model_load_then_unloads(
     assert engine.loaded is False
     assert "PAUSED" in state["statuses"]
     assert state["statuses"][-1] in ("READY", "PAUSED")
+
+
+def test_cpu_worker_pauses_on_gateway_gpu_lock_and_resumes_when_gpu_disappears():
+    paused = threading.Event()
+    resumed = threading.Event()
+    state = {"claims": 0, "statuses": []}
+    worker_holder = {}
+
+    class PriorityClient:
+        def register(self, *args, **kwargs):
+            return True
+
+        def update_worker_status(self, worker_id, status, **metadata):
+            state["statuses"].append(status)
+            if status == "PAUSED_BY_GPU":
+                paused.set()
+            if status == "READY" and paused.is_set():
+                resumed.set()
+
+        def claim_job(self, worker_id):
+            state["claims"] += 1
+            if state["claims"] == 1:
+                raise GatewayError(423, "GPU_WORKER_ACTIVE", retry_after_seconds=1)
+            return None
+
+        def unregister(self, worker_id):
+            pass
+
+    settings = Settings(
+        gateway_url="http://unused", token="test", worker_id="cpu-priority-test",
+        worker_type="cpu", poll_seconds=0.01, heartbeat_seconds=10,
+        request_timeout=2, model_path="/unused/model", model_id="clap-test-model",
+        max_concurrent_jobs=1, prefetch_batch_size=1, inference_batch_size=1,
+        cooldown_seconds=0,
+    )
+    worker = Worker(settings, PriorityClient(), FakeEngine())
+    worker_holder["worker"] = worker
+    thread = Thread(target=worker.run, daemon=True)
+    thread.start()
+
+    try:
+        assert paused.wait(timeout=2), "CPU worker did not report GPU preemption"
+        assert worker.is_ready(), "Intentional GPU pause must not make the CPU worker unhealthy"
+        assert resumed.wait(timeout=3), "CPU worker did not resume after GPU disappeared"
+        assert worker.is_ready(), "Resumed CPU worker should remain healthy"
+    finally:
+        worker.stop()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert state["claims"] == 2
+    assert "PAUSED_BY_GPU" in state["statuses"]
+    assert state["statuses"][-1] == "READY"
+
+
+def test_cpu_batch_stops_after_inflight_inference_when_gpu_preempts_all_leases():
+    gpu_started = threading.Event()
+    revoked = threading.Event()
+    state = {"completed": [], "statuses": [], "loads": 0, "unloads": 0, "inferences": 0}
+    jobs = [
+        {
+            "jobId": f"preempt-job-{index}",
+            "leaseToken": f"preempt-lease-{index}",
+            "audio": {"path": f"Artist/Album/{index}.wav", "sizeBytes": len(AUDIO_BYTES)},
+        }
+        for index in range(3)
+    ]
+
+    class PreemptingClient:
+        def register(self, *args, **kwargs):
+            return True
+
+        def update_worker_status(self, worker_id, status, **metadata):
+            state["statuses"].append(status)
+
+        def claim_job(self, worker_id):
+            if not hasattr(self, "next_job"):
+                self.next_job = 0
+            if self.next_job >= len(jobs):
+                return None
+            job = jobs[self.next_job]
+            self.next_job += 1
+            return job
+
+        def heartbeat(self, worker_id, job_id, lease_token):
+            if not gpu_started.is_set():
+                return {"leaseValid": True}
+            state["revoked_heartbeats"] = state.get("revoked_heartbeats", 0) + 1
+            if state["revoked_heartbeats"] == len(jobs):
+                revoked.set()
+            return {"leaseValid": False}
+
+        def download_audio(self, audio_path, expected_size, destination):
+            with open(destination, "wb") as target:
+                target.write(AUDIO_BYTES)
+
+        def complete_job(self, worker_id, job_id, lease_token, result):
+            state["completed"].append(job_id)
+
+        def fail_job(self, *args, **kwargs):
+            raise AssertionError("Preempted jobs must not be failed by the CPU worker")
+
+        def unregister(self, worker_id):
+            pass
+
+    class PreemptAwareEngine:
+        def load(self):
+            state["loads"] += 1
+
+        def analyze(self, audio_path):
+            state["inferences"] += 1
+            # Simulate GPU approval while the first file is being processed.
+            gpu_started.set()
+            assert revoked.wait(timeout=2), "CPU lease heartbeat did not observe GPU preemption"
+            return {
+                "modelId": "clap-test-model",
+                "embeddingVersion": 1,
+                "dimensions": 512,
+                "embedding": [0.125] * 512,
+                "processingSeconds": 0.01,
+                "runtime": "cpu",
+            }
+
+        def unload(self):
+            state["unloads"] += 1
+
+    settings = Settings(
+        gateway_url="http://unused", token="test", worker_id="cpu-preempt-test",
+        worker_type="cpu", poll_seconds=0.01, heartbeat_seconds=0.02,
+        request_timeout=2, model_path="/unused/model", model_id="clap-test-model",
+        max_concurrent_jobs=3, prefetch_batch_size=3, inference_batch_size=1,
+        cooldown_seconds=0,
+    )
+    worker = Worker(settings, PreemptingClient(), PreemptAwareEngine())
+    jobs_claimed = worker._claim_batch()
+    worker._process_cpu_batch(jobs_claimed)
+
+    assert state["completed"] == []
+    assert state["inferences"] == 1
+    assert state["loads"] == 1
+    assert state["unloads"] == 1
+    assert "PAUSED_BY_GPU" in state["statuses"]
