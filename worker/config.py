@@ -20,6 +20,7 @@ class Settings:
     prefetch_batch_size: int = 1
     inference_batch_size: int = 1
     cooldown_seconds: float = 300.0
+    download_concurrency: int = 1
 
     @classmethod
     def from_env(cls):
@@ -37,11 +38,9 @@ class Settings:
 
         if worker_type == "gpu":
             prefetch_batch_size = int(os.getenv("PARSEC_GPU_PREFETCH_BATCH_SIZE", "20"))
-            inference_batch_size = int(os.getenv("PARSEC_GPU_INFERENCE_BATCH_SIZE", "4"))
             if not 1 <= prefetch_batch_size <= 50:
                 raise ValueError("PARSEC_GPU_PREFETCH_BATCH_SIZE must be between 1 and 50")
-            if not 1 <= inference_batch_size <= prefetch_batch_size:
-                raise ValueError("PARSEC_GPU_INFERENCE_BATCH_SIZE must be between 1 and the prefetch batch size")
+            inference_batch_size = 1
             concurrency_default = prefetch_batch_size
         else:
             prefetch_batch_size = int(os.getenv("PARSEC_CPU_BATCH_SIZE", "10"))
@@ -56,6 +55,10 @@ class Settings:
             raise ValueError("CPU max concurrent jobs must equal the CPU batch size")
         if worker_type == "gpu" and max_concurrent_jobs != prefetch_batch_size:
             raise ValueError("GPU max concurrent jobs must equal the prefetch batch size")
+
+        download_concurrency = int(os.getenv("PARSEC_WORKER_DOWNLOAD_CONCURRENCY", str(prefetch_batch_size)))
+        if not 1 <= download_concurrency <= prefetch_batch_size:
+            raise ValueError("PARSEC_WORKER_DOWNLOAD_CONCURRENCY must be between 1 and the prefetch batch size")
 
         return cls(
             gateway_url=os.getenv("PARSEC_GATEWAY_BASE_URL", "http://127.0.0.1:8766").rstrip("/"),
@@ -73,4 +76,5 @@ class Settings:
             prefetch_batch_size=prefetch_batch_size,
             inference_batch_size=inference_batch_size,
             cooldown_seconds=max(0.0, float(os.getenv("PARSEC_CPU_COOLDOWN_SECONDS", "300"))) if worker_type == "cpu" else 0.0,
+            download_concurrency=download_concurrency,
         )

@@ -118,24 +118,31 @@ class GatewayClient:
         headers = {"Accept": "application/octet-stream"}
         if self.worker_id:
             headers["X-Parsec-Worker-Id"] = self.worker_id
-        response = self.session.post(
-            self._url("/internal/v1/audio/content"),
-            json={"path": audio_path, "start": 0, "length": expected_size},
-            headers=headers,
-            timeout=(15, max(self.timeout, 180)),
-            stream=True,
-        )
-        if response.status_code >= 400:
-            raise GatewayError(response.status_code,
-                               f"Audio download failed with HTTP {response.status_code}: {response.text[:500]}")
-        received = 0
-        with open(destination, "wb") as output:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    output.write(chunk)
-                    received += len(chunk)
-        if received != expected_size:
-            raise GatewayError(502, f"Truncated audio download: received {received} of {expected_size} bytes")
+        # requests.Session is not guaranteed to be thread-safe. Each parallel
+        # download therefore gets its own session with the current worker headers.
+        with requests.Session() as download_session:
+            download_session.headers.update(dict(self.session.headers))
+            response = download_session.post(
+                self._url("/internal/v1/audio/content"),
+                json={"path": audio_path, "start": 0, "length": expected_size},
+                headers=headers,
+                timeout=(15, max(self.timeout, 180)),
+                stream=True,
+            )
+            try:
+                if response.status_code >= 400:
+                    raise GatewayError(response.status_code,
+                                       f"Audio download failed with HTTP {response.status_code}: {response.text[:500]}")
+                received = 0
+                with open(destination, "wb") as output:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            output.write(chunk)
+                            received += len(chunk)
+                if received != expected_size:
+                    raise GatewayError(502, f"Truncated audio download: received {received} of {expected_size} bytes")
+            finally:
+                response.close()
 
     def complete_job(self, worker_id: str, job_id: str, lease_token: str, result: dict):
         worker_path = quote(worker_id, safe="")
