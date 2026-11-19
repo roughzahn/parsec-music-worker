@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import tempfile
 import threading
 import time
@@ -321,56 +322,66 @@ class Worker:
         try:
 
             with tempfile.TemporaryDirectory(prefix="parsec-worker-batch-") as temp_dir:
-                for index, job in enumerate(jobs):
-                    job_id = str(job["jobId"])
-                    if self.stopping.is_set():
-                        outcomes[job_id] = RuntimeError("Worker is stopping")
-                        continue
-                    if heartbeats[job_id][1].is_set():
-                        continue
-                    audio = job["audio"]
-                    source = os.path.join(temp_dir, f"source-{index}")
-                    try:
-                        self.client.download_audio(
-                            str(audio["path"]), int(audio["sizeBytes"]), source
-                        )
-                        self._mark_gateway_contact()
-                        downloaded[job_id] = source
-                    except Exception as exc:
-                        outcomes[job_id] = exc
-
-                valid_jobs = [
-                    job for job in jobs
-                    if str(job["jobId"]) in downloaded
+                pending_downloads = [
+                    (index, job) for index, job in enumerate(jobs)
+                    if not self.stopping.is_set()
                     and not heartbeats[str(job["jobId"])][1].is_set()
                 ]
-                for offset in range(0, len(valid_jobs), self.settings.inference_batch_size):
-                    # A GPU registration revokes all outstanding CPU leases. Re-check
-                    # immediately before every inference chunk so the CPU stops at the
-                    # current file boundary rather than finishing its prefetched batch.
-                    chunk = [
-                        job for job in valid_jobs[offset:offset + self.settings.inference_batch_size]
-                        if not heartbeats[str(job["jobId"])][1].is_set()
-                    ]
-                    if not chunk:
+                if pending_downloads:
+                    download_concurrency = min(
+                        max(1, getattr(self.settings, "download_concurrency", len(pending_downloads))),
+                        len(pending_downloads),
+                    )
+                    print(
+                        f"Downloading {len(pending_downloads)} reserved tracks in parallel "
+                        f"(up to {download_concurrency} simultaneous downloads)",
+                        flush=True,
+                    )
+                    with ThreadPoolExecutor(max_workers=download_concurrency, thread_name_prefix="parsec-audio-download") as executor:
+                        futures = {}
+                        for index, job in pending_downloads:
+                            job_id = str(job["jobId"])
+                            audio = job["audio"]
+                            destination = os.path.join(temp_dir, f"source-{index}")
+                            future = executor.submit(
+                                self.client.download_audio,
+                                str(audio["path"]),
+                                int(audio["sizeBytes"]),
+                                destination,
+                            )
+                            futures[future] = (job_id, destination)
+
+                        for future in as_completed(futures):
+                            job_id, destination = futures[future]
+                            try:
+                                future.result()
+                                downloaded[job_id] = destination
+                                self._mark_gateway_contact()
+                            except Exception as exc:
+                                outcomes[job_id] = exc
+                                print(f"Audio download failed for job {job_id}: {type(exc).__name__}: {exc}", flush=True)
+
+                # All successful downloads are local before sequential inference begins.
+                for job in jobs:
+                    job_id = str(job["jobId"])
+                    if job_id not in downloaded:
+                        continue
+                    if self.stopping.is_set() or heartbeats[job_id][1].is_set():
                         continue
                     try:
-                        if hasattr(self.engine, "analyze_batch"):
-                            chunk_results = self.engine.analyze_batch(
-                                [downloaded[str(job["jobId"])] for job in chunk]
-                            )
+                        audio_path = downloaded[job_id]
+                        if hasattr(self.engine, "analyze"):
+                            result = self.engine.analyze(audio_path)
                         else:
-                            chunk_results = [
-                                self.engine.analyze(downloaded[str(job["jobId"])])
-                                for job in chunk
-                            ]
-                        if len(chunk_results) != len(chunk):
-                            raise RuntimeError("CLAP returned an unexpected number of batch results")
-                        for job, result in zip(chunk, chunk_results):
-                            outcomes[str(job["jobId"])] = result
+                            batch_results = self.engine.analyze_batch([audio_path])
+                            if len(batch_results) != 1:
+                                raise RuntimeError("CLAP returned an unexpected number of results")
+                            result = batch_results[0]
+                        if isinstance(result, Exception):
+                            raise result
+                        outcomes[job_id] = result
                     except Exception as exc:
-                        for job in chunk:
-                            outcomes[str(job["jobId"])] = exc
+                        outcomes[job_id] = exc
 
             for job in jobs:
                 job_id = str(job["jobId"])

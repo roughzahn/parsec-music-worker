@@ -69,11 +69,14 @@ def test_gpu_audio_download_includes_worker_identity_header(monkeypatch, tmp_pat
         def iter_content(self, chunk_size):
             yield b"abc"
 
-    def post(*args, **kwargs):
+        def close(self):
+            pass
+
+    def post(session, *args, **kwargs):
         captured.update(kwargs)
         return Response()
 
-    monkeypatch.setattr(client.session, "post", post)
+    monkeypatch.setattr("requests.Session.post", post)
     destination = tmp_path / "audio.bin"
     client.download_audio("track.wav", 3, str(destination))
 

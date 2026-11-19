@@ -3,7 +3,7 @@ import pytest
 from worker.config import Settings
 
 
-def test_gpu_settings_default_to_twenty_prefetched_and_four_inference_jobs(monkeypatch):
+def test_gpu_settings_default_to_twenty_prefetched_and_single_track_inference(monkeypatch):
     monkeypatch.delenv("PARSEC_WORKER_TYPE", raising=False)
     monkeypatch.delenv("PARSEC_WORKER_MAX_CONCURRENT_JOBS", raising=False)
     monkeypatch.delenv("PARSEC_GPU_PREFETCH_BATCH_SIZE", raising=False)
@@ -16,7 +16,8 @@ def test_gpu_settings_default_to_twenty_prefetched_and_four_inference_jobs(monke
     assert settings.worker_type == "gpu"
     assert settings.token == ""
     assert settings.prefetch_batch_size == 20
-    assert settings.inference_batch_size == 4
+    assert settings.inference_batch_size == 1
+    assert settings.download_concurrency == 20
     assert settings.max_concurrent_jobs == 20
     assert settings.heartbeat_seconds == 10
 
@@ -30,6 +31,7 @@ def test_cpu_profile_defaults_to_ten_job_batches_and_five_minute_cooldown(monkey
     assert settings.worker_type == "cpu"
     assert settings.prefetch_batch_size == 10
     assert settings.inference_batch_size == 1
+    assert settings.download_concurrency == 10
     assert settings.max_concurrent_jobs == 10
     assert settings.cooldown_seconds == 300
 
@@ -41,11 +43,10 @@ def test_rejects_gpu_concurrency_not_matching_prefetch(monkeypatch):
         Settings.from_env()
 
 
-def test_rejects_invalid_inference_batch_size(monkeypatch):
+def test_gpu_inference_batch_setting_is_ignored_to_keep_processing_sequential(monkeypatch):
     monkeypatch.setenv("PARSEC_GPU_PREFETCH_BATCH_SIZE", "3")
     monkeypatch.setenv("PARSEC_GPU_INFERENCE_BATCH_SIZE", "4")
-    with pytest.raises(ValueError, match="between 1 and the prefetch batch size"):
-        Settings.from_env()
+    assert Settings.from_env().inference_batch_size == 1
 
 
 def test_cpu_profile_still_requires_static_token(monkeypatch):

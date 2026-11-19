@@ -8,7 +8,7 @@ The worker is intentionally a pull-only execution agent:
 
 - Registers its identity, runtime type and capabilities with the Gateway.
 - CPU reserves up to 10 jobs per work cycle; GPU prefetches a configurable queue of jobs from the Gateway.
-- Renews every reserved job lease while downloads and batched inference are running.
+- Renews every reserved job lease while the batch downloads and tracks are processed sequentially.
 - Downloads the requested audio through the Gateway's existing private reverse-audio endpoint.
 - Generates a 512-dimensional LAION-CLAP embedding.
 - Submits the result or reports a failure.
@@ -28,12 +28,13 @@ The normal CPU work/rest cycle is:
 
 1. Reserve up to PARSEC_CPU_BATCH_SIZE jobs (default 10) through individual atomic Gateway claims.
 2. Start lease heartbeats for every reserved job.
-3. Load CLAP once and process the reserved jobs sequentially. CPU inference batch size remains 1 to limit transient RAM use.
-4. Complete or fail each job independently.
-5. Unload CLAP, publish PAUSED, and wait PARSEC_CPU_COOLDOWN_SECONDS (default 300 seconds).
-6. Publish READY and begin the next cycle.
+3. Download all reserved audio files concurrently into a temporary local batch directory.
+4. Load CLAP once and process the downloaded tracks strictly one at a time.
+5. Complete or fail each job independently.
+6. Unload CLAP, publish PAUSED, and wait PARSEC_CPU_COOLDOWN_SECONDS (default 300 seconds).
+7. Publish READY and begin the next cycle.
 
-The worker stays registered and its health endpoint remains UP while CLAP is unloaded and during the intentional cooldown. No host metrics, LOAD_ALLOWED handshake, or resource-dependent pause response is used. The GPU profile and its batching behavior are unchanged.
+The worker stays registered and its health endpoint remains UP while CLAP is unloaded and during the intentional cooldown. No host metrics, LOAD_ALLOWED handshake, or resource-dependent pause response is used. The GPU worker follows the same download-first cycle and also processes exactly one track per inference.
 
 ## Runtime profiles
 
@@ -42,7 +43,7 @@ Both profiles use the same Python application and analysis implementation. Only 
 | Profile | Runtime | Intended use |
 |---|---|---|
 | `cpu` | PyTorch CPU | Small incremental updates; CPU-only hosts |
-| `gpu` | PyTorch CUDA 12.8 | Batched CLAP inference and full-library reindexing |
+| `gpu` | PyTorch CUDA 12.8 | GPU-accelerated CLAP inference and full-library reindexing |
 
 The model checkpoint is supplied as a read-only host volume. It is not included in the image or Git.
 
@@ -68,9 +69,9 @@ Additional runtime settings:
 - `PARSEC_WORKER_TYPE`: `cpu` or `gpu` (set by the compose profile).
 - `PARSEC_WORKER_POLL_SECONDS`: delay after an empty queue (default 3).
 - `PARSEC_WORKER_HEARTBEAT_SECONDS`: lease renewal interval (CPU: 20 seconds; GPU: 10 seconds).
-- `PARSEC_WORKER_MAX_CONCURRENT_JOBS`: advertised Gateway reservation capacity (CPU: 1; GPU: same value as prefetch size).
+- `PARSEC_WORKER_MAX_CONCURRENT_JOBS`: advertised Gateway reservation capacity (CPU: same value as batch size (default 10); GPU: same value as prefetch size).
 - `PARSEC_GPU_PREFETCH_BATCH_SIZE`: maximum number of GPU jobs reserved ahead (default 20; range 1–50).
-- `PARSEC_GPU_INFERENCE_BATCH_SIZE`: number of audio files passed to CLAP in one GPU inference call (default 4; must not exceed prefetch size).
+- `PARSEC_WORKER_DOWNLOAD_CONCURRENCY`: maximum simultaneous audio downloads (defaults to the batch size: 10 for CPU, 20 for GPU).
 - `PARSEC_CLAP_MODEL_PATH`: model path inside the container.
 - `PARSEC_CLAP_MODEL_ID`: embedding model identifier.
 
@@ -138,7 +139,7 @@ The Gateway reserves the job atomically before returning it. The worker renews i
 
 The worker fetches exactly `sizeBytes` from the existing `POST /internal/v1/audio/content` endpoint. The Gateway uses the reverse Audio Node connection to retrieve bytes from the NAS, so a NAS behind NAT never needs an inbound port.
 
-CPU workers continue to execute one job at a time. GPU workers reserve up to 20 jobs by default, keep each lease alive independently, and process the files in inference batches of 4 by default. Each job is still completed or failed independently. Running multiple containers or hosts concurrently is supported by unique worker IDs and Gateway-side atomic reservations.
+CPU workers process one track at a time. GPU workers reserve up to 20 jobs by default, keep each lease alive independently, and download the reserved files concurrently, then process them strictly one track at a time. Each job is still completed or failed independently. Running multiple containers or hosts concurrently is supported by unique worker IDs and Gateway-side atomic reservations.
 
 ## Result contract
 
